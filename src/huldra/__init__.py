@@ -731,7 +731,15 @@ class MetadataManager:
     def write_metadata(cls, metadata: Dict[str, Any], directory: Path) -> None:
         """Write metadata to file."""
         metadata_path = directory / "metadata.json"
-        metadata_path.write_text(json.dumps(metadata, indent=2))
+        metadata_path.write_text(
+            json.dumps(
+                metadata,
+                indent=2,
+                default=lambda o: o.model_dump()
+                if BaseModel is not None and isinstance(o, BaseModel)
+                else str(o),
+            )
+        )
 
     @classmethod
     def read_metadata(cls, directory: Path) -> Dict[str, Any]:
