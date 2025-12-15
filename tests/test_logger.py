@@ -2,6 +2,7 @@ import json
 import logging
 
 import huldra
+import pytest
 from huldra.runtime.logging import _HuldraRichConsoleHandler
 
 
@@ -93,3 +94,26 @@ def test_load_or_create_writes_separator_and_suppresses_cache_hit_logs(
     assert f"load_or_create {obj.__class__.__name__} {obj.hexdigest}" in text
     assert str(obj.huldra_dir) in text
     assert text.count("_create: ok ") == 1
+
+
+def test_rich_console_colors_only_load_or_create_token() -> None:
+    pytest.importorskip("rich")
+
+    record = logging.LogRecord(
+        name="huldra",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="load_or_create Foo 123 dir=/tmp (success->load)",
+        args=(),
+        exc_info=None,
+    )
+    record.huldra_action_color = "green"  # type: ignore[attr-defined]
+
+    text = _HuldraRichConsoleHandler._format_message_text(record)
+    assert text.plain == "load_or_create Foo 123 dir=/tmp"
+    assert len(text.spans) == 1
+    span = text.spans[0]
+    assert span.start == 0
+    assert span.end == len("load_or_create")
+    assert str(span.style) == "green"

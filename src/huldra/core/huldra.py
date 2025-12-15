@@ -246,13 +246,13 @@ class Huldra[T](ABC):
                     action_color = "green"
                 elif attempt_status0 in {"queued", "running"}:
                     decision = f"{attempt_status0}->wait"
-                    action_color = "blue"
+                    action_color = "yellow"
                 else:
                     decision = "create"
                     action_color = "blue"
 
                 logger.info(
-                    "exists_or_create %s %s",
+                    "load_or_create %s %s",
                     self.__class__.__name__,
                     self.hexdigest,
                     extra={
@@ -266,6 +266,7 @@ class Huldra[T](ABC):
                     self.hexdigest,
                     directory,
                     decision,
+                    extra={"huldra_action_color": action_color},
                 )
 
                 # Fast path: already successful
