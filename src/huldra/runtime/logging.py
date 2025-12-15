@@ -15,6 +15,28 @@ _HULDRA_HOLDER_STACK: contextvars.ContextVar[tuple[Any, ...]] = contextvars.Cont
 _HULDRA_LOG_LOCK = threading.Lock()
 _HULDRA_CONSOLE_LOCK = threading.Lock()
 
+_LOAD_OR_CREATE_PREFIX = "load_or_create"
+
+
+def _strip_load_or_create_decision_suffix(message: str) -> str:
+    """
+    Strip a trailing `(<decision>)` suffix from `load_or_create ...` console lines.
+
+    This keeps detailed decision info in file logs, but makes console output cleaner.
+    """
+    if not message.startswith(_LOAD_OR_CREATE_PREFIX):
+        return message
+    if not message.endswith(")"):
+        return message
+    idx = message.rfind(" (")
+    if idx == -1:
+        return message
+
+    decision = message[idx + 2 : -1]
+    if decision == "create" or "->" in decision:
+        return message[:idx]
+    return message
+
 
 def _holder_to_log_dir(holder: Any) -> Path:
     if isinstance(holder, Path):
@@ -127,6 +149,21 @@ class _HuldraRichConsoleHandler(logging.Handler):
 
         self._console = Console(stderr=True)
 
+    @staticmethod
+    def _format_message_text(record: logging.LogRecord) -> Any:
+        from rich.text import Text  # type: ignore
+
+        message = _strip_load_or_create_decision_suffix(record.getMessage())
+        action_color = getattr(record, "huldra_action_color", None)
+        if isinstance(action_color, str) and message.startswith(_LOAD_OR_CREATE_PREFIX):
+            prefix = _LOAD_OR_CREATE_PREFIX
+            rest = message[len(prefix) :]
+            text = Text()
+            text.append(prefix, style=action_color)
+            text.append(rest)
+            return text
+        return Text(message)
+
     def emit(self, record: logging.LogRecord) -> None:
         try:
             from rich.text import Text  # type: ignore
@@ -146,7 +183,7 @@ class _HuldraRichConsoleHandler(logging.Handler):
         line.append(" ")
         line.append(location, style=level_style)
         line.append(" ")
-        line.append(record.getMessage())
+        line.append_text(self._format_message_text(record))
 
         with _HULDRA_CONSOLE_LOCK:
             self._console.print(line)
