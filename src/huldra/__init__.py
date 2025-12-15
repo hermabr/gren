@@ -1,4 +1,5 @@
 import contextlib
+import contextvars
 import datetime
 import enum
 import getpass
@@ -6,6 +7,7 @@ import hashlib
 import importlib
 import inspect
 import json
+import logging
 import os
 import pathlib
 import platform
@@ -38,6 +40,153 @@ from typing import (
 import chz
 import submitit
 from typing_extensions import dataclass_transform
+
+
+# =============================================================================
+# Logging (scoped to the current "holder" object)
+# =============================================================================
+
+
+_HULDRA_HOLDER_STACK: contextvars.ContextVar[tuple[Any, ...]] = contextvars.ContextVar(
+    "huldra_holder_stack", default=()
+)
+_HULDRA_LOG_LOCK = threading.Lock()
+
+
+def _holder_to_log_dir(holder: Any) -> Path:
+    if isinstance(holder, Path):
+        return holder
+    directory = getattr(holder, "huldra_dir", None)
+    if isinstance(directory, Path):
+        return directory
+    raise TypeError(
+        "holder must be a pathlib.Path or have a .huldra_dir: pathlib.Path attribute"
+    )
+
+
+@contextlib.contextmanager
+def enter_holder(holder: Any) -> Generator[None, None, None]:
+    """
+    Push a holder object onto the logging stack for this context.
+
+    Huldra calls this automatically during `load_or_create()`, so nested
+    dependencies will log to the active dependency's folder and then revert.
+    """
+    configure_logging()
+    stack = _HULDRA_HOLDER_STACK.get()
+    token = _HULDRA_HOLDER_STACK.set((*stack, holder))
+    try:
+        yield
+    finally:
+        _HULDRA_HOLDER_STACK.reset(token)
+
+
+def current_holder() -> Any | None:
+    """Return the current holder object for logging, if any."""
+    stack = _HULDRA_HOLDER_STACK.get()
+    return stack[-1] if stack else None
+
+
+def current_log_dir() -> Path:
+    """Return the directory logs should be written to for this context."""
+    holder = current_holder()
+    if holder is None:
+        return HULDRA_CONFIG.base_root
+    return _holder_to_log_dir(holder)
+
+
+class _HuldraLogFormatter(logging.Formatter):
+    def formatTime(  # noqa: N802 - keep logging.Formatter API
+        self, record: logging.LogRecord, datefmt: str | None = None
+    ) -> str:
+        dt = datetime.datetime.fromtimestamp(record.created, tz=datetime.timezone.utc)
+        return dt.isoformat(timespec="seconds")
+
+
+class _HuldraContextFileHandler(logging.Handler):
+    """
+    A logging handler that writes to `current_log_dir() / "huldra.log"` at emit-time.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+        except Exception:
+            self.handleError(record)
+            return
+
+        directory = current_log_dir()
+        with contextlib.suppress(Exception):
+            directory.mkdir(parents=True, exist_ok=True)
+
+        log_path = directory / "huldra.log"
+        with _HULDRA_LOG_LOCK:
+            with log_path.open("a", encoding="utf-8") as fp:
+                fp.write(f"{message}\n")
+
+
+class _HuldraScopeFilter(logging.Filter):
+    """
+    Capture all logs while inside a holder context.
+
+    Outside a holder context, only capture logs from the `huldra` logger namespace.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if current_holder() is not None:
+            return True
+        return record.name == "huldra" or record.name.startswith("huldra.")
+
+
+def configure_logging() -> None:
+    """
+    Install a context-aware file handler on the root logger (idempotent).
+
+    With this installed, any stdlib logger (e.g. `logging.getLogger(__name__)`)
+    that propagates to the root logger will be written to the current holder's
+    `huldra.log` while a holder is active.
+    """
+    root = logging.getLogger()
+    if any(isinstance(h, _HuldraContextFileHandler) for h in root.handlers):
+        return
+
+    handler = _HuldraContextFileHandler(level=logging.DEBUG)
+    handler.addFilter(_HuldraScopeFilter())
+    handler.setFormatter(_HuldraLogFormatter("%(asctime)s [%(levelname)s] %(message)s"))
+    root.addHandler(handler)
+
+
+def get_logger() -> logging.Logger:
+    """
+    Return the default huldra logger.
+
+    It is configured with a context-aware file handler that routes log records to
+    the current holder's directory (see `enter_holder()`).
+    """
+    configure_logging()
+    logger = logging.getLogger("huldra")
+    logger.setLevel(logging.DEBUG)
+    return logger
+
+
+def log(message: str, *, level: str = "INFO") -> Path:
+    """
+    Log a message to the current holder's `huldra.log` via stdlib `logging`.
+
+    If no holder is active, logs to `HULDRA_CONFIG.base_root / "huldra.log"`.
+    Returns the path written to.
+    """
+    directory = current_log_dir()
+    log_path = directory / "huldra.log"
+
+    level_no = logging.getLevelNamesMapping().get(level.upper())
+    if level_no is None:
+        raise ValueError(f"Unknown log level: {level!r}")
+
+    configure_logging()
+    get_logger().log(level_no, message)
+    return log_path
+
 
 def _get_pydantic_base_model() -> type[Any] | None:
     try:
@@ -906,6 +1055,10 @@ class Huldra[T](ABC):
         """Convert to Python code."""
         return HuldraSerializer.to_python(self, multiline=multiline)
 
+    def log(self: Self, message: str, *, level: str = "INFO") -> Path:
+        """Log a message to the current holder's `huldra.log`."""
+        return log(message, level=level)
+
     def exists(self: Self) -> bool:
         """Check if result exists and is valid."""
         directory = self.huldra_dir
@@ -945,53 +1098,83 @@ class Huldra[T](ABC):
         Raises:
             HuldraComputeError: If computation fails with detailed error information
         """
-        start_time = time.time()
-        directory = self.huldra_dir
-        directory.mkdir(parents=True, exist_ok=True)
+        with enter_holder(self):
+            logger = get_logger()
+            start_time = time.time()
+            directory = self.huldra_dir
+            directory.mkdir(parents=True, exist_ok=True)
+            logger.debug(
+                "load_or_create: enter %s digest=%s dir=%s",
+                self.__class__.__name__,
+                self.hexdigest,
+                directory,
+            )
 
-        # Fast path: already successful
-        if StateManager.read_state(directory).get("status") == "success":
-            try:
-                # return self._load() if (executor is None or wait) else None
-                return self._load()
-            except Exception as e:
-                raise HuldraComputeError(
-                    f"Failed to load result from {directory}",
-                    StateManager.get_state_path(directory),
-                    e,
-                ) from e
-
-        # Synchronous execution
-        if executor is None:
-            try:
-                status, created_here, result = self._run_locally(start_time=start_time)
-                if status == "success":
-                    if created_here:
-                        return cast(T, result)
+            # Fast path: already successful
+            if StateManager.read_state(directory).get("status") == "success":
+                try:
+                    logger.debug(
+                        "load_or_create: %s digest=%s -> _load()",
+                        self.__class__.__name__,
+                        self.hexdigest,
+                    )
+                    # return self._load() if (executor is None or wait) else None
                     return self._load()
+                except Exception as e:
+                    raise HuldraComputeError(
+                        f"Failed to load result from {directory}",
+                        StateManager.get_state_path(directory),
+                        e,
+                    ) from e
 
-                state = StateManager.read_state(directory)
-                raise HuldraComputeError(
-                    f"Computation {status}: {state.get('reason', 'unknown error')}",
-                    StateManager.get_state_path(directory),
-                )
-            except HuldraComputeError:
-                raise
-            except Exception as e:
-                raise HuldraComputeError(
-                    "Unexpected error during computation",
-                    StateManager.get_state_path(directory),
-                    e,
-                ) from e
+            # Synchronous execution
+            if executor is None:
+                try:
+                    status, created_here, result = self._run_locally(
+                        start_time=start_time
+                    )
+                    if status == "success":
+                        if created_here:
+                            logger.debug(
+                                "load_or_create: %s digest=%s created -> return",
+                                self.__class__.__name__,
+                                self.hexdigest,
+                            )
+                            return cast(T, result)
+                        logger.debug(
+                            "load_or_create: %s digest=%s success -> _load()",
+                            self.__class__.__name__,
+                            self.hexdigest,
+                        )
+                        return self._load()
 
-        # Asynchronous execution with submitit
-        (submitit_folder := self.huldra_dir / "submitit").mkdir(
-            exist_ok=True, parents=True
-        )
-        executor.folder = submitit_folder
-        adapter = SubmititAdapter(executor)
+                    state = StateManager.read_state(directory)
+                    raise HuldraComputeError(
+                        f"Computation {status}: {state.get('reason', 'unknown error')}",
+                        StateManager.get_state_path(directory),
+                    )
+                except HuldraComputeError:
+                    raise
+                except Exception as e:
+                    raise HuldraComputeError(
+                        "Unexpected error during computation",
+                        StateManager.get_state_path(directory),
+                        e,
+                    ) from e
 
-        return self._submit_once(adapter, directory, None)  # ty: ignore[invalid-return-type] # TODO: fix typing here
+            # Asynchronous execution with submitit
+            (submitit_folder := self.huldra_dir / "submitit").mkdir(
+                exist_ok=True, parents=True
+            )
+            executor.folder = submitit_folder
+            adapter = SubmititAdapter(executor)
+
+            logger.debug(
+                "load_or_create: %s digest=%s -> submitit submit_once()",
+                self.__class__.__name__,
+                self.hexdigest,
+            )
+            return self._submit_once(adapter, directory, None)  # ty: ignore[invalid-return-type] # TODO: fix typing here
 
     def _check_timeout(self, start_time: float) -> None:
         """Check if operation has timed out."""
@@ -1061,6 +1244,7 @@ class Huldra[T](ABC):
         start_time: float,
     ) -> T:
         """Submit job and wait, resubmitting on preemption up to max_requeues times."""
+        logger = get_logger()
         attempts_left = max_requeues
 
         while True:
@@ -1071,6 +1255,11 @@ class Huldra[T](ABC):
             # Success - load and return result
             if status == "success":
                 try:
+                    logger.debug(
+                        "load_or_create: %s digest=%s submitit success -> _load()",
+                        self.__class__.__name__,
+                        self.hexdigest,
+                    )
                     return self._load()
                 except Exception as e:
                     raise HuldraComputeError(
@@ -1221,66 +1410,80 @@ class Huldra[T](ABC):
 
     def _worker_entry(self: Self) -> None:
         """Entry point for worker process (called by submitit or locally)."""
-        directory = self.huldra_dir
-        directory.mkdir(parents=True, exist_ok=True)
+        with enter_holder(self):
+            logger = get_logger()
+            directory = self.huldra_dir
+            directory.mkdir(parents=True, exist_ok=True)
 
-        # Try to acquire compute lock
-        lock_path = directory / StateManager.COMPUTE_LOCK
-        lock_fd = StateManager.try_lock(lock_path)
+            # Try to acquire compute lock
+            lock_path = directory / StateManager.COMPUTE_LOCK
+            lock_fd = StateManager.try_lock(lock_path)
 
-        if lock_fd is None:
-            # Someone else is computing, wait for them
-            while True:
-                state = StateManager.read_state(directory)
-                status = state.get("status")
+            if lock_fd is None:
+                # Someone else is computing, wait for them
+                while True:
+                    state = StateManager.read_state(directory)
+                    status = state.get("status")
 
-                if status in {"success", "failed", "preempted"}:
-                    return
+                    if status in {"success", "failed", "preempted"}:
+                        return
 
-                print("someone else is computing. waiting for them")
-                time.sleep(HULDRA_CONFIG.poll_interval)
-
-        try:
-            # Collect submitit environment info
-            env_info = self._collect_submitit_env()
-
-            # Refresh metadata
-            metadata = MetadataManager.create_metadata(
-                self, directory, ignore_diff=HULDRA_CONFIG.ignore_git_diff
-            )
-            MetadataManager.write_metadata(metadata, directory)
-
-            # Update state to running
-            StateManager.write_state(directory, status="running", **env_info)
-
-            # Start heartbeat
-            stop_heartbeat = self._start_heartbeat(directory)
-
-            # Set up signal handlers
-            self._setup_signal_handlers(directory, stop_heartbeat)
+                    print("someone else is computing. waiting for them")
+                    time.sleep(HULDRA_CONFIG.poll_interval)
 
             try:
-                # Run computation
-                self._create()
-                StateManager.write_state(directory, status="success")
-            except Exception as e:
-                # Always show a full, colored traceback on stderr
-                _print_colored_traceback(e)
+                # Collect submitit environment info
+                env_info = self._collect_submitit_env()
 
-                # Check if we were preempted
-                current_state = StateManager.read_state(directory)
-                if current_state.get("status") != "preempted":
-                    tb = "".join(
-                        traceback.format_exception(type(e), e, e.__traceback__)
+                # Refresh metadata
+                metadata = MetadataManager.create_metadata(
+                    self, directory, ignore_diff=HULDRA_CONFIG.ignore_git_diff
+                )
+                MetadataManager.write_metadata(metadata, directory)
+
+                # Update state to running
+                StateManager.write_state(directory, status="running", **env_info)
+
+                # Start heartbeat
+                stop_heartbeat = self._start_heartbeat(directory)
+
+                # Set up signal handlers
+                self._setup_signal_handlers(directory, stop_heartbeat)
+
+                try:
+                    # Run computation
+                    logger.debug(
+                        "_create: begin %s digest=%s dir=%s",
+                        self.__class__.__name__,
+                        self.hexdigest,
+                        directory,
                     )
-                    StateManager.write_state(
-                        directory, status="failed", reason=str(e), traceback=tb
+                    self._create()
+                    logger.debug(
+                        "_create: ok %s digest=%s dir=%s",
+                        self.__class__.__name__,
+                        self.hexdigest,
+                        directory,
                     )
-                raise
+                    StateManager.write_state(directory, status="success")
+                except Exception as e:
+                    # Always show a full, colored traceback on stderr
+                    _print_colored_traceback(e)
+
+                    # Check if we were preempted
+                    current_state = StateManager.read_state(directory)
+                    if current_state.get("status") != "preempted":
+                        tb = "".join(
+                            traceback.format_exception(type(e), e, e.__traceback__)
+                        )
+                        StateManager.write_state(
+                            directory, status="failed", reason=str(e), traceback=tb
+                        )
+                    raise
+                finally:
+                    stop_heartbeat()
             finally:
-                stop_heartbeat()
-        finally:
-            StateManager.release_lock(lock_fd, lock_path)
+                StateManager.release_lock(lock_fd, lock_path)
 
     def _collect_submitit_env(self: Self) -> Dict[str, Any]:
         """Collect submitit/slurm environment information."""
@@ -1319,6 +1522,7 @@ class Huldra[T](ABC):
 
     def _run_locally(self: Self, start_time: float) -> tuple[str, bool, T | None]:
         """Run computation locally, returning (status, created_here, result)."""
+        logger = get_logger()
         directory = self.huldra_dir
         lock_path = directory / StateManager.COMPUTE_LOCK
 
@@ -1375,7 +1579,19 @@ class Huldra[T](ABC):
 
             try:
                 # Run the computation
+                logger.debug(
+                    "_create: begin %s digest=%s dir=%s",
+                    self.__class__.__name__,
+                    self.hexdigest,
+                    directory,
+                )
                 result = self._create()
+                logger.debug(
+                    "_create: ok %s digest=%s dir=%s",
+                    self.__class__.__name__,
+                    self.hexdigest,
+                    directory,
+                )
                 StateManager.write_state(directory, status="success")
                 return "success", True, result
             except Exception as e:
