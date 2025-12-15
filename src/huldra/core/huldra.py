@@ -467,11 +467,12 @@ class Huldra[T](ABC):
                     return
 
                 if not logged_wait:
-                    logger.debug(
+                    logger.info(
                         "compute: waiting for compute lock %s %s dir=%s",
                         self.__class__.__name__,
                         self.hexdigest,
                         directory,
+                        extra={"huldra_console_only": True},
                     )
                     logged_wait = True
                 time.sleep(HULDRA_CONFIG.poll_interval)
@@ -623,11 +624,12 @@ class Huldra[T](ABC):
                     break
 
                 if not logged_wait:
-                    logger.debug(
+                    logger.info(
                         "compute: waiting for compute lock %s %s dir=%s",
                         self.__class__.__name__,
                         self.hexdigest,
                         directory,
+                        extra={"huldra_console_only": True},
                     )
                     logged_wait = True
                 time.sleep(HULDRA_CONFIG.poll_interval)
