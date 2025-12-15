@@ -1,20 +1,31 @@
+import json
+import socket
+
 import huldra
 
 
-def test_state_read_write_and_staleness(huldra_tmp_root, tmp_path) -> None:
+def test_state_default_and_attempt_lifecycle(huldra_tmp_root, tmp_path) -> None:
     directory = tmp_path / "obj"
     directory.mkdir()
 
     state0 = huldra.StateManager.read_state(directory)
-    assert state0["status"] == "missing"
+    assert state0["schema_version"] == huldra.StateManager.SCHEMA_VERSION
+    assert state0["result"]["status"] == "absent"
+    assert state0["attempt"] is None
 
-    huldra.StateManager.write_state(directory, status="queued", foo=1)
+    attempt_id = huldra.StateManager.start_attempt(
+        directory,
+        backend="local",
+        status="running",
+        lease_duration_sec=0.05,
+        owner={"pid": 99999, "host": "other-host", "user": "x"},
+        scheduler={},
+    )
     state1 = huldra.StateManager.read_state(directory)
-    assert state1["status"] == "queued"
-    assert state1["foo"] == 1
+    assert state1["result"]["status"] == "incomplete"
+    assert state1["attempt"]["id"] == attempt_id
+    assert state1["attempt"]["status"] == "running"
     assert "updated_at" in state1
-
-    assert huldra.StateManager.is_stale(directory, timeout=60) is False
 
 
 def test_locks_are_exclusive(huldra_tmp_root, tmp_path) -> None:
@@ -30,27 +41,38 @@ def test_locks_are_exclusive(huldra_tmp_root, tmp_path) -> None:
     assert lock_path.exists() is False
 
 
-def test_leases_can_be_renewed_and_reconciled(huldra_tmp_root, tmp_path) -> None:
+def test_reconcile_marks_dead_local_attempt_as_crashed(huldra_tmp_root, tmp_path) -> None:
     directory = tmp_path / "obj"
     directory.mkdir()
 
-    huldra.StateManager.write_state(
+    attempt_id = huldra.StateManager.start_attempt(
         directory,
+        backend="local",
         status="running",
-        owner_id="a",
-        **huldra.StateManager.new_lease(lease_duration_sec=0.01),
+        lease_duration_sec=60.0,
+        owner={"pid": 99999, "host": socket.gethostname(), "user": "x"},
+        scheduler={},
     )
 
-    assert huldra.StateManager.renew_lease(
-        directory, owner_id="b", lease_duration_sec=0.01
+    assert huldra.StateManager.heartbeat(
+        directory, attempt_id="wrong", lease_duration_sec=60.0
     ) is False
-    assert huldra.StateManager.renew_lease(
-        directory, owner_id="a", lease_duration_sec=0.01
+    assert huldra.StateManager.heartbeat(
+        directory, attempt_id=attempt_id, lease_duration_sec=60.0
     ) is True
 
-    # Let the lease expire and reconcile.
-    import time
-
-    time.sleep(0.02)
-    assert huldra.StateManager.reconcile_expired_running(directory) is True
-    assert huldra.StateManager.read_state(directory).get("status") == "cancelled"
+    # If reconcile decides the attempt is dead, it clears the compute lock.
+    (directory / huldra.StateManager.COMPUTE_LOCK).write_text(
+        json.dumps(
+            {
+                "pid": 99999,
+                "host": socket.gethostname(),
+                "created_at": "x",
+                "lock_id": "x",
+            }
+        )
+        + "\n"
+    )
+    state2 = huldra.StateManager.reconcile(directory)
+    assert state2["attempt"]["status"] == "crashed"
+    assert (directory / huldra.StateManager.COMPUTE_LOCK).exists() is False
