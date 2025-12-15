@@ -83,6 +83,8 @@ class SubmititAdapter:
         self,
         job: Any,
         directory: Path,
+        *,
+        attempt_id: str,
         callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         """Watch for job ID in background thread and update state."""
@@ -91,7 +93,17 @@ class SubmititAdapter:
             while True:
                 job_id = self.get_job_id(job)
                 if job_id:
-                    StateManager.write_state(directory, job_id=job_id)
+                    def mutate(state: dict[str, Any]) -> None:
+                        attempt = state.get("attempt")
+                        if not isinstance(attempt, dict) or attempt.get("id") != attempt_id:
+                            return
+                        scheduler = attempt.get("scheduler")
+                        if not isinstance(scheduler, dict):
+                            scheduler = {}
+                            attempt["scheduler"] = scheduler
+                        scheduler["job_id"] = job_id
+
+                    StateManager.update_state(directory, mutate)
                     if callback:
                         with contextlib.suppress(Exception):
                             callback(job_id)
@@ -100,7 +112,6 @@ class SubmititAdapter:
                 if self.is_done(job):
                     break
 
-                print("watching job id", job)
                 time.sleep(0.5)
 
         thread = threading.Thread(target=watcher, daemon=True)
@@ -132,3 +143,41 @@ class SubmititAdapter:
             return "failed"
 
         return None
+
+    def probe(self: Self, directory: Path, state: dict[str, Any]) -> dict[str, Any]:
+        """
+        Best-effort scheduler reconciliation.
+
+        Returns a dict for `StateManager.reconcile(..., submitit_probe=...)`:
+        - `terminal_status`: one of {failed, cancelled, preempted, crashed}
+        - `scheduler_state`: raw scheduler state when available
+        - `reason`: best-effort reason string
+        """
+        job = self.load_job(directory)
+        if job is None:
+            return {}
+
+        scheduler_state = self.get_state(job)
+        classified = self.classify_scheduler_state(scheduler_state)
+        if classified is None:
+            if self.is_done(job):
+                return {
+                    "terminal_status": "crashed",
+                    "scheduler_state": scheduler_state,
+                    "reason": "job_done_unknown_state",
+                }
+            return {}
+
+        # `COMPLETED` doesn't guarantee the worker wrote a success marker/state.
+        if classified == "success":
+            return {
+                "terminal_status": "crashed",
+                "scheduler_state": scheduler_state,
+                "reason": "scheduler_completed_no_success_marker",
+            }
+
+        return {
+            "terminal_status": classified,
+            "scheduler_state": scheduler_state,
+            "reason": f"scheduler:{scheduler_state}",
+        }

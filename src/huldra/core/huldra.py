@@ -9,7 +9,6 @@ import sys
 import threading
 import time
 import traceback
-import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Self, TypeVar, cast, overload
@@ -25,6 +24,10 @@ from ..runtime import _print_colored_traceback, current_holder
 from ..runtime.logging import enter_holder, get_logger, log, write_separator
 from ..serialization import HuldraSerializer
 from ..storage import MetadataManager, StateManager
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
 
 
 @dataclass_transform(
@@ -175,7 +178,7 @@ class Huldra[T](ABC):
         directory = self.huldra_dir
         state = StateManager.read_state(directory)
 
-        if state.get("status") != "success":
+        if not StateManager.is_success(state):
             logger.info("exists %s -> false", directory)
             return False
 
@@ -230,23 +233,32 @@ class Huldra[T](ABC):
                 start_time = time.time()
                 directory = self.huldra_dir
                 directory.mkdir(parents=True, exist_ok=True)
-                self._reconcile_stale_running(directory)
+                adapter0 = SubmititAdapter(executor) if executor is not None else None
+                self._reconcile(directory, adapter=adapter0)
                 state0 = StateManager.read_state(directory)
-                status0 = state0.get("status")
+                result0 = _as_dict(state0.get("result"))
+                attempt0 = _as_dict(state0.get("attempt"))
+                result_status0 = result0.get("status")
+                attempt_status0 = attempt0.get("status")
                 write_separator()
-                if status0 == "success":
+                if result_status0 == "success":
                     decision = "success->load"
-                elif status0 in {"queued", "running"}:
-                    decision = f"{status0}->wait"
+                    action_color = "green"
+                elif attempt_status0 in {"queued", "running"}:
+                    decision = f"{attempt_status0}->wait"
+                    action_color = "blue"
                 else:
-                    decision = "missing->create"
+                    decision = "create"
+                    action_color = "blue"
 
                 logger.info(
-                    "load_or_create %s %s (%s)",
+                    "exists_or_create %s %s",
                     self.__class__.__name__,
                     self.hexdigest,
-                    decision,
-                    extra={"huldra_console_only": True},
+                    extra={
+                        "huldra_console_only": True,
+                        "huldra_action_color": action_color,
+                    },
                 )
                 logger.debug(
                     "load_or_create %s %s dir=%s (%s)",
@@ -257,7 +269,7 @@ class Huldra[T](ABC):
                 )
 
                 # Fast path: already successful
-                if StateManager.read_state(directory).get("status") == "success":
+                if StateManager.is_success(StateManager.read_state(directory)):
                     try:
                         result = self._load()
                         ok = True
@@ -295,8 +307,12 @@ class Huldra[T](ABC):
                             return self._load()
 
                         state = StateManager.read_state(directory)
+                        attempt = _as_dict(state.get("attempt"))
+                        error = _as_dict(attempt.get("error"))
+                        message = error.get("message")
+                        suffix = f": {message}" if isinstance(message, str) and message else ""
                         raise HuldraComputeError(
-                            f"Computation {status}: {state.get('reason', 'unknown error')}",
+                            f"Computation {status}{suffix}",
                             StateManager.get_state_path(directory),
                         )
                     except HuldraComputeError:
@@ -347,11 +363,16 @@ class Huldra[T](ABC):
     ) -> Optional[Any]:
         """Submit job once without waiting (fire-and-forget mode)."""
         logger = get_logger()
+        self._reconcile(directory, adapter=adapter)
         state = StateManager.read_state(directory)
-
-        # If already queued or running, return existing job
-        if state.get("status") in {"queued", "running"}:
-            return adapter.load_job(directory)
+        attempt = _as_dict(state.get("attempt"))
+        if attempt.get("backend") == "submitit" and attempt.get("status") in {
+            "queued",
+            "running",
+        }:
+            job = adapter.load_job(directory)
+            if job is not None:
+                return job
 
         # Try to acquire submit lock
         lock_path = directory / StateManager.SUBMIT_LOCK
@@ -375,19 +396,41 @@ class Huldra[T](ABC):
             )
             MetadataManager.write_metadata(metadata, directory)
 
-            # Submit job
-            StateManager.write_state(directory, status="queued")
+            attempt_id = StateManager.start_attempt(
+                directory,
+                backend="submitit",
+                status="queued",
+                lease_duration_sec=HULDRA_CONFIG.lease_duration_sec,
+                owner=MetadataManager.collect_environment_info(),
+                scheduler={},
+            )
             job = adapter.submit(lambda: self._worker_entry())
 
             # Save job handle and watch for job ID
             adapter.pickle_job(job, directory)
-            adapter.watch_job_id(job, directory, on_job_id)
+            adapter.watch_job_id(
+                job,
+                directory,
+                attempt_id=attempt_id,
+                callback=on_job_id,
+            )
 
             return job
         except Exception as e:
-            StateManager.write_state(
-                directory, status="failed", reason=f"Failed to submit: {e}"
-            )
+            if "attempt_id" in locals():
+                StateManager.finish_attempt_failed(
+                    directory,
+                    attempt_id=attempt_id,
+                    error={
+                        "type": type(e).__name__,
+                        "message": f"Failed to submit: {e}",
+                    },
+                )
+            else:
+                def mutate(state: dict[str, Any]) -> None:
+                    state["result"] = {"status": "failed"}
+
+                StateManager.update_state(directory, mutate)
             raise HuldraComputeError(
                 "Failed to submit job",
                 StateManager.get_state_path(directory),
@@ -395,195 +438,6 @@ class Huldra[T](ABC):
             ) from e
         finally:
             StateManager.release_lock(lock_fd, lock_path)
-
-    def _submit_and_wait_with_retries(
-        self,
-        adapter: SubmititAdapter,
-        directory: Path,
-        on_job_id: Optional[Callable[[Any], None]],
-        max_requeues: int,
-        start_time: float,
-    ) -> T:
-        """Submit job and wait, resubmitting on preemption up to max_requeues times."""
-        logger = get_logger()
-        attempts_left = max_requeues
-
-        while True:
-            self._check_timeout(start_time)
-            self._reconcile_stale_running(directory)
-            state = StateManager.read_state(directory)
-            status = state.get("status")
-
-            # Success - load and return result
-            if status == "success":
-                try:
-                    logger.debug(
-                        "load_or_create: %s submitit success -> _load()",
-                        self.__class__.__name__,
-                    )
-                    return self._load()
-                except Exception as e:
-                    raise HuldraComputeError(
-                        f"Failed to load result from {directory}",
-                        StateManager.get_state_path(directory),
-                        e,
-                    ) from e
-
-            # Already queued/running - wait for it
-            if status == "running":
-                remaining_lease = StateManager.lease_time_remaining_sec(state)
-                if remaining_lease is not None and remaining_lease <= 0:
-                    continue
-
-            if status in {"queued", "running"} and (
-                status != "queued"
-                or not StateManager.is_stale(directory, HULDRA_CONFIG.stale_timeout)
-            ):
-                job = adapter.load_job(directory)
-                if job:
-                    # Calculate remaining time for wait
-                    remaining = None
-                    if self._max_wait_time_sec is not None:
-                        remaining = max(
-                            0.1,
-                            self._max_wait_time_sec - (time.time() - start_time),
-                        )
-
-                    if status == "running":
-                        remaining_lease = StateManager.lease_time_remaining_sec(
-                            StateManager.read_state(directory)
-                        )
-                        if remaining_lease is not None:
-                            remaining = (
-                                min(remaining, max(0.1, remaining_lease))
-                                if remaining is not None
-                                else max(0.1, remaining_lease)
-                            )
-
-                    # We have the job handle, wait for it
-                    adapter.wait(job, timeout=remaining)
-
-                    # Check scheduler state
-                    scheduler_state = adapter.get_state(job)
-                    final_status = adapter.classify_scheduler_state(scheduler_state)
-
-                    if final_status:
-                        StateManager.write_state(directory, status=final_status)
-                else:
-                    # No job handle, just poll silently
-                    time.sleep(HULDRA_CONFIG.poll_interval)
-                continue
-
-            # Stale running state - break the lock
-            if status == "running":
-                self._reconcile_stale_running(directory)
-
-            # Need to submit (or resubmit)
-            try:
-                status = self._submit_and_wait_once(
-                    adapter, directory, on_job_id, start_time
-                )
-            except Exception as e:
-                raise HuldraComputeError(
-                    "Failed during submit and wait",
-                    StateManager.get_state_path(directory),
-                    e,
-                ) from e
-
-            if status == "success":
-                try:
-                    return self._load()
-                except Exception as e:
-                    raise HuldraComputeError(
-                        f"Failed to load result from {directory}",
-                        StateManager.get_state_path(directory),
-                        e,
-                    ) from e
-
-            # Preempted - retry if we have attempts left
-            if status == "preempted" and attempts_left > 0:
-                attempts_left -= 1
-                logger.info(
-                    "preempted %s (resubmit, %d attempts left)",
-                    directory,
-                    attempts_left,
-                )
-                continue
-
-            # Failed or out of retries
-            state = StateManager.read_state(directory)
-            raise HuldraComputeError(
-                f"Computation {status}: {state.get('reason', 'unknown error')}",
-                StateManager.get_state_path(directory),
-            )
-
-    def _submit_and_wait_once(
-        self,
-        adapter: SubmititAdapter,
-        directory: Path,
-        on_job_id: Optional[Callable[[Any], None]],
-        start_time: float,
-    ) -> str:
-        """Submit job and wait for completion once (no retries)."""
-        state = StateManager.read_state(directory)
-
-        # Only submit if not already queued/running
-        if state.get("status") not in {"queued", "running"}:
-            lock_path = directory / StateManager.SUBMIT_LOCK
-            lock_fd = StateManager.try_lock(lock_path)
-
-            if lock_fd is not None:
-                try:
-                    # Create metadata
-                    metadata = MetadataManager.create_metadata(
-                        self, directory, ignore_diff=HULDRA_CONFIG.ignore_git_diff
-                    )
-                    MetadataManager.write_metadata(metadata, directory)
-
-                    # Submit job
-                    StateManager.write_state(directory, status="queued")
-                    job = adapter.submit(lambda: self._worker_entry())
-
-                    # Save job handle and watch for job ID
-                    adapter.pickle_job(job, directory)
-                    adapter.watch_job_id(job, directory, on_job_id)
-                finally:
-                    StateManager.release_lock(lock_fd, lock_path)
-            else:
-                # Someone else submitted, wait briefly
-                time.sleep(0.5)
-
-        # Wait for completion
-        job = adapter.load_job(directory)
-        if job:
-            # Calculate remaining time for wait
-            remaining = None
-            if self._max_wait_time_sec is not None:
-                remaining = max(
-                    0.1, self._max_wait_time_sec - (time.time() - start_time)
-                )
-
-            adapter.wait(job, timeout=remaining)
-
-            # Get final state from scheduler
-            scheduler_state = adapter.get_state(job)
-            final_status = adapter.classify_scheduler_state(scheduler_state)
-
-            if final_status:
-                StateManager.write_state(directory, status=final_status)
-                return final_status
-
-        # Poll until done
-        while True:
-            self._check_timeout(start_time)
-            self._reconcile_stale_running(directory)
-            state = StateManager.read_state(directory)
-            status = state.get("status")
-
-            if status in {"success", "failed", "preempted", "cancelled"}:
-                return cast(str, status)
-
-            time.sleep(HULDRA_CONFIG.poll_interval)
 
     def _worker_entry(self: Self) -> None:
         """Entry point for worker process (called by submitit or locally)."""
@@ -600,15 +454,17 @@ class Huldra[T](ABC):
                 if lock_fd is not None:
                     break
 
-                self._reconcile_stale_running(directory)
+                self._reconcile(directory)
                 state = StateManager.read_state(directory)
-                status = state.get("status")
+                attempt = _as_dict(state.get("attempt"))
+                result = _as_dict(state.get("result"))
+                status = attempt.get("status") or result.get("status")
 
-                if status in {"success", "failed", "preempted"}:
+                if StateManager.is_success(state):
                     return
 
-                if status == "cancelled":
-                    continue
+                if status in {"failed", "cancelled", "preempted"}:
+                    return
 
                 if not logged_wait:
                     logger.debug(
@@ -621,7 +477,6 @@ class Huldra[T](ABC):
                 time.sleep(HULDRA_CONFIG.poll_interval)
 
             try:
-                # Collect submitit environment info
                 env_info = self._collect_submitit_env()
 
                 # Refresh metadata
@@ -630,23 +485,30 @@ class Huldra[T](ABC):
                 )
                 MetadataManager.write_metadata(metadata, directory)
 
-                # Update state to running
-                owner_id = uuid.uuid4().hex
-                StateManager.write_state(
+                attempt_id = StateManager.start_attempt(
                     directory,
+                    backend="submitit",
                     status="running",
-                    owner_id=owner_id,
-                    **StateManager.new_lease(
-                        lease_duration_sec=HULDRA_CONFIG.lease_duration_sec
-                    ),
-                    **env_info,
+                    lease_duration_sec=HULDRA_CONFIG.lease_duration_sec,
+                    owner={
+                        "pid": os.getpid(),
+                        "host": socket.gethostname(),
+                        "user": getpass.getuser(),
+                        "command": " ".join(sys.argv) if sys.argv else "<unknown>",
+                    },
+                    scheduler={
+                        "backend": env_info.get("backend"),
+                        "job_id": env_info.get("slurm_job_id"),
+                    },
                 )
 
                 # Start heartbeat
-                stop_heartbeat = self._start_heartbeat(directory, owner_id=owner_id)
+                stop_heartbeat = self._start_heartbeat(directory, attempt_id=attempt_id)
 
                 # Set up signal handlers
-                self._setup_signal_handlers(directory, stop_heartbeat)
+                self._setup_signal_handlers(
+                    directory, stop_heartbeat, attempt_id=attempt_id
+                )
 
                 try:
                     # Run computation
@@ -663,7 +525,8 @@ class Huldra[T](ABC):
                         self.hexdigest,
                         directory,
                     )
-                    StateManager.write_state(directory, status="success")
+                    StateManager.write_success_marker(directory, attempt_id=attempt_id)
+                    StateManager.finish_attempt_success(directory, attempt_id=attempt_id)
                     logger.info(
                         "_create ok %s %s",
                         self.__class__.__name__,
@@ -674,15 +537,19 @@ class Huldra[T](ABC):
                     # Always show a full, colored traceback on stderr
                     _print_colored_traceback(e)
 
-                    # Check if we were preempted
-                    current_state = StateManager.read_state(directory)
-                    if current_state.get("status") != "preempted":
-                        tb = "".join(
-                            traceback.format_exception(type(e), e, e.__traceback__)
-                        )
-                        StateManager.write_state(
-                            directory, status="failed", reason=str(e), traceback=tb
-                        )
+                    tb = "".join(
+                        traceback.format_exception(type(e), e, e.__traceback__)
+                    )
+                    StateManager.finish_attempt_failed(
+                        directory,
+                        attempt_id=attempt_id,
+                        status="failed",
+                        error={
+                            "type": type(e).__name__,
+                            "message": str(e),
+                            "traceback": tb,
+                        },
+                    )
                     raise
                 finally:
                     stop_heartbeat()
@@ -740,14 +607,19 @@ class Huldra[T](ABC):
             # Someone else is computing, wait for them
             while True:
                 self._check_timeout(start_time)
-                self._reconcile_stale_running(directory)
+                self._reconcile(directory)
                 state = StateManager.read_state(directory)
-                status = state.get("status")
+                attempt = _as_dict(state.get("attempt"))
+                result_state = _as_dict(state.get("result"))
+                attempt_status = attempt.get("status")
+                result_status = result_state.get("status")
 
-                if status in {"success", "failed", "preempted"}:
-                    return cast(str, status), False, None
+                if StateManager.is_success(state):
+                    return "success", False, None
+                if result_status == "failed":
+                    return "failed", False, None
 
-                if status == "cancelled":
+                if attempt_status in {"cancelled", "preempted", "crashed"}:
                     break
 
                 if not logged_wait:
@@ -760,7 +632,7 @@ class Huldra[T](ABC):
                     logged_wait = True
                 time.sleep(HULDRA_CONFIG.poll_interval)
 
-            # Dependency got cancelled (stale lease) so retry lock acquisition.
+            # Dependency attempt is no longer running; retry lock acquisition.
             lock_fd = None
 
         try:
@@ -777,24 +649,25 @@ class Huldra[T](ABC):
                     e,
                 ) from e
 
-            # Update state to running
-            owner_id = uuid.uuid4().hex
-            StateManager.write_state(
+            attempt_id = StateManager.start_attempt(
                 directory,
-                status="running",
                 backend="local",
-                owner_id=owner_id,
-                **StateManager.new_lease(
-                    lease_duration_sec=HULDRA_CONFIG.lease_duration_sec
-                ),
-                **MetadataManager.collect_environment_info(),
+                status="running",
+                lease_duration_sec=HULDRA_CONFIG.lease_duration_sec,
+                owner={
+                    "pid": os.getpid(),
+                    "host": socket.gethostname(),
+                    "user": getpass.getuser(),
+                    "command": " ".join(sys.argv) if sys.argv else "<unknown>",
+                },
+                scheduler={},
             )
 
             # Start heartbeat
-            stop_heartbeat = self._start_heartbeat(directory, owner_id=owner_id)
+            stop_heartbeat = self._start_heartbeat(directory, attempt_id=attempt_id)
 
             # Set up preemption handler
-            self._setup_signal_handlers(directory, stop_heartbeat)
+            self._setup_signal_handlers(directory, stop_heartbeat, attempt_id=attempt_id)
 
             try:
                 # Run the computation
@@ -811,7 +684,8 @@ class Huldra[T](ABC):
                     self.hexdigest,
                     directory,
                 )
-                StateManager.write_state(directory, status="success")
+                StateManager.write_success_marker(directory, attempt_id=attempt_id)
+                StateManager.finish_attempt_success(directory, attempt_id=attempt_id)
                 logger.info(
                     "_create ok %s %s",
                     self.__class__.__name__,
@@ -823,15 +697,13 @@ class Huldra[T](ABC):
                 # If it failed, always print a colored traceback
                 _print_colored_traceback(e)
 
-                # Check if we were preempted
-                current_state = StateManager.read_state(directory)
-                if current_state.get("status") == "preempted":
-                    return "preempted", False, None
-
                 # Record failure (plain text in file)
                 tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-                StateManager.write_state(
-                    directory, status="failed", reason=str(e), traceback=tb
+                StateManager.finish_attempt_failed(
+                    directory,
+                    attempt_id=attempt_id,
+                    status="failed",
+                    error={"type": type(e).__name__, "message": str(e), "traceback": tb},
                 )
                 return "failed", False, None
             finally:
@@ -840,7 +712,7 @@ class Huldra[T](ABC):
             StateManager.release_lock(lock_fd, lock_path)
 
     def _start_heartbeat(
-        self: Self, directory: Path, *, owner_id: str
+        self: Self, directory: Path, *, attempt_id: str
     ) -> Callable[[], None]:
         """Start heartbeat thread, return stop function."""
         stop_event = threading.Event()
@@ -848,9 +720,9 @@ class Huldra[T](ABC):
         def heartbeat():
             while not stop_event.wait(HULDRA_CONFIG.heartbeat_interval_sec):
                 with contextlib.suppress(Exception):
-                    StateManager.renew_lease(
+                    StateManager.heartbeat(
                         directory,
-                        owner_id=owner_id,
+                        attempt_id=attempt_id,
                         lease_duration_sec=HULDRA_CONFIG.lease_duration_sec,
                     )
 
@@ -858,39 +730,34 @@ class Huldra[T](ABC):
         thread.start()
         return stop_event.set
 
-    def _reconcile_stale_running(self: Self, directory: Path) -> None:
-        """
-        If a process died without updating state, treat stale `running` as cancelled.
-
-        This makes downstream waiters bounded: they can resubmit/retry once the lease expires.
-        """
-        state = StateManager.read_state(directory)
-        if state.get("status") != "running":
+    def _reconcile(
+        self: Self, directory: Path, *, adapter: SubmititAdapter | None = None
+    ) -> None:
+        if adapter is None:
+            StateManager.reconcile(directory)
             return
 
-        reconciled = False
-        if "lease_expires_at" in state:
-            reconciled = StateManager.reconcile_expired_running(directory)
-        else:
-            if StateManager.is_stale(directory, HULDRA_CONFIG.stale_timeout):
-                StateManager.write_state(
-                    directory, status="cancelled", reason="stale_running"
-                )
-                reconciled = True
-
-        if reconciled:
-            with contextlib.suppress(Exception):
-                (directory / StateManager.COMPUTE_LOCK).unlink()
+        StateManager.reconcile(
+            directory,
+            submitit_probe=lambda state: adapter.probe(directory, state),
+        )
 
     def _setup_signal_handlers(
-        self, directory: Path, stop_heartbeat: Callable[[], None]
+        self,
+        directory: Path,
+        stop_heartbeat: Callable[[], None],
+        *,
+        attempt_id: str,
     ) -> None:
         """Set up signal handlers for graceful preemption."""
 
         def handle_signal(signum: int, frame: Any) -> None:
             try:
-                StateManager.write_state(
-                    directory, status="preempted", reason=f"signal:{signum}"
+                StateManager.finish_attempt_failed(
+                    directory,
+                    attempt_id=attempt_id,
+                    status="preempted",
+                    error={"type": "signal", "message": f"signal:{signum}"},
                 )
             finally:
                 stop_heartbeat()

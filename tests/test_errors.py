@@ -19,9 +19,11 @@ def test_failed_create_raises_compute_error_and_records_state(huldra_tmp_root) -
         obj.load_or_create()
 
     state = huldra.StateManager.read_state(obj.huldra_dir)
-    assert state["status"] == "failed"
-    assert "boom" in state.get("reason", "")
-    assert "traceback" in state
+    assert state["result"]["status"] == "failed"
+    attempt = state["attempt"]
+    assert attempt["status"] == "failed"
+    assert "boom" in attempt["error"]["message"]
+    assert "traceback" in attempt["error"]
 
 
 class InvalidValidate(huldra.Huldra[int]):
