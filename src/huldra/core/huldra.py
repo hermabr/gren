@@ -297,17 +297,17 @@ class Huldra[T](ABC):
                 # Cache hits can be extremely noisy in pipelines; keep logs for state
                 # transitions (create/wait) and error cases, but suppress repeated
                 # "success->load" lines and the raw separator on successful loads.
+                logger.info(
+                    "load_or_create %s %s",
+                    self.__class__.__name__,
+                    self.hexdigest,
+                    extra={
+                        "huldra_console_only": True,
+                        "huldra_action_color": action_color,
+                    },
+                )
                 if decision != "success->load":
                     write_separator()
-                    logger.info(
-                        "load_or_create %s %s",
-                        self.__class__.__name__,
-                        self.hexdigest,
-                        extra={
-                            "huldra_console_only": True,
-                            "huldra_action_color": action_color,
-                        },
-                    )
                     logger.debug(
                         "load_or_create %s %s %s (%s)",
                         self.__class__.__name__,
