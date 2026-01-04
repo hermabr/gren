@@ -89,3 +89,4 @@ class DashboardStats(BaseModel):
     queued_count: int
     failed_count: int
     success_count: int
+

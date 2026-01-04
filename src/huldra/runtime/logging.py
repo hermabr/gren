@@ -109,15 +109,10 @@ class _HuldraContextFileHandler(logging.Handler):
     """
 
     def emit(self, record: logging.LogRecord) -> None:
-        try:
-            message = self.format(record)
-        except Exception:
-            self.handleError(record)
-            return
+        message = self.format(record)
 
         directory = current_log_dir()
-        with contextlib.suppress(Exception):
-            directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True)
 
         log_path = directory / "huldra.log"
         with _HULDRA_LOG_LOCK:
@@ -191,10 +186,7 @@ class _HuldraRichConsoleHandler(logging.Handler):
         return Text(message)
 
     def emit(self, record: logging.LogRecord) -> None:
-        try:
-            from rich.text import Text  # type: ignore
-        except Exception:  # pragma: no cover
-            return
+        from rich.text import Text  # type: ignore
 
         level_style = self._level_style(record.levelno)
         timestamp = datetime.datetime.fromtimestamp(
@@ -214,19 +206,16 @@ class _HuldraRichConsoleHandler(logging.Handler):
             self._console.print(line)
 
         if record.exc_info:
-            try:
-                from rich.traceback import Traceback  # type: ignore
+            from rich.traceback import Traceback  # type: ignore
 
-                exc_type, exc_value, tb = record.exc_info
-                if exc_type is not None and exc_value is not None and tb is not None:
-                    with _HULDRA_CONSOLE_LOCK:
-                        self._console.print(
-                            Traceback.from_exception(
-                                exc_type, exc_value, tb, show_locals=False
-                            )
+            exc_type, exc_value, tb = record.exc_info
+            if exc_type is not None and exc_value is not None and tb is not None:
+                with _HULDRA_CONSOLE_LOCK:
+                    self._console.print(
+                        Traceback.from_exception(
+                            exc_type, exc_value, tb, show_locals=False
                         )
-            except Exception:
-                pass
+                    )
 
     @staticmethod
     def _level_style(levelno: int) -> str:
@@ -259,14 +248,7 @@ def configure_logging() -> None:
         )
         root.addHandler(handler)
 
-    try:
-        import rich  # type: ignore
-    except Exception:  # pragma: no cover
-        rich = None  # type: ignore
-
-    if rich is not None and not any(
-        isinstance(h, _HuldraRichConsoleHandler) for h in root.handlers
-    ):
+    if not any(isinstance(h, _HuldraRichConsoleHandler) for h in root.handlers):
         console = _HuldraRichConsoleHandler(level=_console_level())
         console.addFilter(_HuldraConsoleFilter())
         root.addHandler(console)
@@ -313,8 +295,7 @@ def write_separator(line: str = "------------------") -> Path:
     directory = current_log_dir()
     log_path = directory / "huldra.log"
 
-    with contextlib.suppress(Exception):
-        directory.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(parents=True, exist_ok=True)
 
     with _HULDRA_LOG_LOCK:
         with log_path.open("a", encoding="utf-8") as fp:

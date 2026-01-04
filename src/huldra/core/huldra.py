@@ -1,4 +1,3 @@
-import contextlib
 import datetime
 import getpass
 import inspect
@@ -174,8 +173,7 @@ class Huldra[T](ABC):
             reason,
         )
 
-        with contextlib.suppress(Exception):
-            StateManager.get_success_marker_path(directory).unlink(missing_ok=True)
+        StateManager.get_success_marker_path(directory).unlink(missing_ok=True)
 
         now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
@@ -234,13 +232,9 @@ class Huldra[T](ABC):
             logger.info("exists %s -> false", directory)
             return False
 
-        try:
-            ok = self._validate()
-            logger.info("exists %s -> %s", directory, "true" if ok else "false")
-            return ok
-        except Exception:
-            logger.info("exists %s -> false", directory)
-            return False
+        ok = self._validate()
+        logger.info("exists %s -> %s", directory, "true" if ok else "false")
+        return ok
 
     def get_metadata(self: Self) -> "HuldraMetadata":
         """Get metadata for this object."""
@@ -377,44 +371,37 @@ class Huldra[T](ABC):
 
                 # Synchronous execution
                 if executor is None:
-                    try:
-                        status, created_here, result = self._run_locally(
-                            start_time=start_time
-                        )
-                        if status == "success":
-                            ok = True
-                            if created_here:
-                                logger.debug(
-                                    "load_or_create: %s created -> return",
-                                    self.__class__.__name__,
-                                )
-                                return cast(T, result)
+                    status, created_here, result = self._run_locally(
+                        start_time=start_time
+                    )
+                    if status == "success":
+                        ok = True
+                        if created_here:
                             logger.debug(
-                                "load_or_create: %s success -> _load()",
+                                "load_or_create: %s created -> return",
                                 self.__class__.__name__,
                             )
-                            return self._load()
+                            return cast(T, result)
+                        logger.debug(
+                            "load_or_create: %s success -> _load()",
+                            self.__class__.__name__,
+                        )
+                        return self._load()
 
-                        state = StateManager.read_state(directory)
-                        attempt = state.attempt
-                        message = (
-                            attempt.error.message
-                            if isinstance(attempt, _StateAttemptFailed)
-                            else None
-                        )
-                        suffix = (
-                            f": {message}"
-                            if isinstance(message, str) and message
-                            else ""
-                        )
-                        raise HuldraComputeError(
-                            f"Computation {status}{suffix}",
-                            StateManager.get_state_path(directory),
-                        )
-                    except HuldraComputeError:
-                        raise
-                    except Exception:
-                        raise
+                    state = StateManager.read_state(directory)
+                    attempt = state.attempt
+                    message = (
+                        attempt.error.message
+                        if isinstance(attempt, _StateAttemptFailed)
+                        else None
+                    )
+                    suffix = (
+                        f": {message}" if isinstance(message, str) and message else ""
+                    )
+                    raise HuldraComputeError(
+                        f"Computation {status}{suffix}",
+                        StateManager.get_state_path(directory),
+                    )
 
                 # Asynchronous execution with submitit
                 (submitit_folder := self.huldra_dir / "submitit").mkdir(
@@ -658,9 +645,11 @@ class Huldra[T](ABC):
 
     def _collect_submitit_env(self: Self) -> _SubmititEnvInfo:
         """Collect submitit/slurm environment information."""
+        slurm_id = os.getenv("SLURM_JOB_ID")
+
         info: _SubmititEnvInfo = {
-            "backend": "local",
-            "slurm_job_id": None,
+            "backend": "slurm" if slurm_id else "local",
+            "slurm_job_id": slurm_id,
             "pid": os.getpid(),
             "host": socket.gethostname(),
             "user": getpass.getuser(),
@@ -670,24 +659,11 @@ class Huldra[T](ABC):
             "command": " ".join(sys.argv) if sys.argv else "<unknown>",
         }
 
-        # Try to get SLURM job ID from environment
-        slurm_id = os.getenv("SLURM_JOB_ID")
+        # Only call submitit.JobEnvironment() when actually in a submitit job
         if slurm_id:
-            info["backend"] = "slurm"
-            info["slurm_job_id"] = slurm_id
-
-        # Try to use submitit if available
-        try:
-            import submitit
-
-            try:
-                env = submitit.JobEnvironment()
-                info["backend"] = "submitit"
-                info["slurm_job_id"] = str(getattr(env, "job_id", slurm_id))
-            except Exception:
-                pass
-        except ImportError:
-            pass
+            env = submitit.JobEnvironment()
+            info["backend"] = "submitit"
+            info["slurm_job_id"] = str(getattr(env, "job_id", slurm_id))
 
         return info
 
@@ -829,12 +805,11 @@ class Huldra[T](ABC):
 
         def heartbeat():
             while not stop_event.wait(HULDRA_CONFIG.heartbeat_interval_sec):
-                with contextlib.suppress(Exception):
-                    StateManager.heartbeat(
-                        directory,
-                        attempt_id=attempt_id,
-                        lease_duration_sec=HULDRA_CONFIG.lease_duration_sec,
-                    )
+                StateManager.heartbeat(
+                    directory,
+                    attempt_id=attempt_id,
+                    lease_duration_sec=HULDRA_CONFIG.lease_duration_sec,
+                )
 
         thread = threading.Thread(target=heartbeat, daemon=True)
         thread.start()
@@ -874,8 +849,7 @@ class Huldra[T](ABC):
                 os._exit(exit_code)
 
         for sig in (signal.SIGTERM, signal.SIGINT):
-            with contextlib.suppress(Exception):
-                signal.signal(sig, handle_signal)
+            signal.signal(sig, handle_signal)
 
 
 _H = TypeVar("_H", bound=Huldra, covariant=True)

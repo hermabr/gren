@@ -106,8 +106,6 @@ def _state_to_detail(
 def _find_experiment_dirs(root: Path) -> list[Path]:
     """Find all directories containing .huldra/state.json files."""
     experiments = []
-    if not root.exists():
-        return experiments
 
     # Walk the directory tree looking for .huldra directories
     for huldra_dir in root.rglob(".huldra"):
@@ -124,10 +122,7 @@ def _read_metadata(directory: Path) -> JsonDict | None:
     metadata_path = directory / ".huldra" / "metadata.json"
     if not metadata_path.is_file():
         return None
-    try:
-        return json.loads(metadata_path.read_text())
-    except Exception:
-        return None
+    return json.loads(metadata_path.read_text())
 
 
 def scan_experiments(
@@ -151,29 +146,23 @@ def scan_experiments(
 
     # Scan both data and git roots
     for root in [HULDRA_CONFIG.get_root(False), HULDRA_CONFIG.get_root(True)]:
+        if not root.exists():
+            continue
         for experiment_dir in _find_experiment_dirs(root):
-            try:
-                state = StateManager.read_state(experiment_dir)
-                namespace, huldra_hash = _parse_namespace_from_path(
-                    experiment_dir, root
-                )
+            state = StateManager.read_state(experiment_dir)
+            namespace, huldra_hash = _parse_namespace_from_path(experiment_dir, root)
 
-                summary = _state_to_summary(state, namespace, huldra_hash)
+            summary = _state_to_summary(state, namespace, huldra_hash)
 
-                # Apply filters
-                if result_status and summary.result_status != result_status:
-                    continue
-                if attempt_status and summary.attempt_status != attempt_status:
-                    continue
-                if namespace_prefix and not summary.namespace.startswith(
-                    namespace_prefix
-                ):
-                    continue
-
-                experiments.append(summary)
-            except Exception:
-                # Skip experiments with invalid state
+            # Apply filters
+            if result_status and summary.result_status != result_status:
                 continue
+            if attempt_status and summary.attempt_status != attempt_status:
+                continue
+            if namespace_prefix and not summary.namespace.startswith(namespace_prefix):
+                continue
+
+            experiments.append(summary)
 
     # Sort by updated_at (newest first), with None values at the end
     experiments.sort(
@@ -204,14 +193,11 @@ def get_experiment_detail(namespace: str, huldra_hash: str) -> ExperimentDetail 
         state_file = experiment_dir / ".huldra" / "state.json"
 
         if state_file.is_file():
-            try:
-                state = StateManager.read_state(experiment_dir)
-                metadata = _read_metadata(experiment_dir)
-                return _state_to_detail(
-                    state, namespace, huldra_hash, experiment_dir, metadata
-                )
-            except Exception:
-                return None
+            state = StateManager.read_state(experiment_dir)
+            metadata = _read_metadata(experiment_dir)
+            return _state_to_detail(
+                state, namespace, huldra_hash, experiment_dir, metadata
+            )
 
     return None
 
@@ -233,27 +219,26 @@ def get_stats() -> DashboardStats:
 
     # Scan both data and git roots
     for root in [HULDRA_CONFIG.get_root(False), HULDRA_CONFIG.get_root(True)]:
+        if not root.exists():
+            continue
         for experiment_dir in _find_experiment_dirs(root):
-            try:
-                state = StateManager.read_state(experiment_dir)
-                total += 1
+            state = StateManager.read_state(experiment_dir)
+            total += 1
 
-                result_counts[state.result.status] += 1
+            result_counts[state.result.status] += 1
 
-                if state.result.status == "success":
-                    success += 1
-                elif state.result.status == "failed":
-                    failed += 1
+            if state.result.status == "success":
+                success += 1
+            elif state.result.status == "failed":
+                failed += 1
 
-                attempt = state.attempt
-                if attempt:
-                    attempt_counts[attempt.status] += 1
-                    if attempt.status == "running":
-                        running += 1
-                    elif attempt.status == "queued":
-                        queued += 1
-            except Exception:
-                continue
+            attempt = state.attempt
+            if attempt:
+                attempt_counts[attempt.status] += 1
+                if attempt.status == "running":
+                    running += 1
+                elif attempt.status == "queued":
+                    queued += 1
 
     return DashboardStats(
         total=total,
