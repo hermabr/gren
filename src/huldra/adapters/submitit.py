@@ -1,4 +1,3 @@
-import contextlib
 import threading
 import time
 from pathlib import Path
@@ -46,11 +45,10 @@ class SubmititAdapter:
 
     def wait(self, job: SubmititJob, timeout: float | None = None) -> None:
         """Wait for job completion."""
-        with contextlib.suppress(Exception):
-            if timeout:
-                job.result(timeout=timeout)
-            else:
-                job.wait()
+        if timeout:
+            job.result(timeout=timeout)
+        else:
+            job.wait()
 
     def get_job_id(self, job: SubmititJob) -> str | None:
         """Get job ID if available."""
@@ -68,20 +66,14 @@ class SubmititAdapter:
 
     def get_state(self, job: SubmititJob) -> str | None:
         """Get job state from scheduler."""
-        try:
-            state_fn = getattr(job, "state", None)
-            if state_fn and callable(state_fn):
-                return state_fn()
-        except Exception:
-            pass
+        state_fn = getattr(job, "state", None)
+        if state_fn and callable(state_fn):
+            return state_fn()
         return None
 
     def pickle_job(self, job: SubmititJob, directory: Path) -> None:
         """Pickle job handle to file."""
-        try:
-            import cloudpickle as pickle  # type: ignore
-        except Exception:  # pragma: no cover
-            import pickle  # type: ignore
+        import cloudpickle as pickle
 
         job_path = StateManager.get_internal_dir(directory) / self.JOB_PICKLE
         job_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,16 +85,11 @@ class SubmititAdapter:
         job_path = StateManager.get_internal_dir(directory) / self.JOB_PICKLE
         if not job_path.is_file():
             return None
-        try:
-            try:
-                import cloudpickle as pickle  # type: ignore
-            except Exception:  # pragma: no cover
-                import pickle  # type: ignore
 
-            with job_path.open("rb") as f:
-                return pickle.load(f)
-        except Exception:
-            return None
+        import cloudpickle as pickle
+
+        with job_path.open("rb") as f:
+            return pickle.load(f)
 
     def watch_job_id(
         self,
@@ -127,8 +114,7 @@ class SubmititAdapter:
 
                     StateManager.update_state(directory, mutate)
                     if callback:
-                        with contextlib.suppress(Exception):
-                            callback(job_id)
+                        callback(job_id)
                     break
 
                 if self.is_done(job):
@@ -174,9 +160,13 @@ class SubmititAdapter:
         - `terminal_status`: one of {failed, cancelled, preempted, crashed}
         - `scheduler_state`: raw scheduler state when available
         - `reason`: best-effort reason string
+
+        Returns empty dict if job status cannot be determined (e.g., job pickle
+        doesn't exist yet), allowing reconcile to fall back to lease expiry.
         """
         job = self.load_job(directory)
         if job is None:
+            # Job pickle doesn't exist - can't determine status, fall back to lease expiry
             return {}
 
         scheduler_state = self.get_state(job)

@@ -86,37 +86,33 @@ class MetadataManager:
         return directory / cls.INTERNAL_DIR / cls.METADATA_FILE
 
     @staticmethod
-    def safe_git_command(args: list[str]) -> str:
-        """Run git command safely, return output or error message."""
-        try:
-            proc = subprocess.run(
-                ["git", *args], text=True, capture_output=True, timeout=10
-            )
-            if proc.returncode not in (0, 1):
-                proc.check_returncode()
-            return proc.stdout.strip()
-        except Exception as exc:
-            print(f"WARNING: git {' '.join(args)} failed: {exc}", file=sys.stderr)
-            return "<unavailable>"
+    def run_git_command(args: list[str]) -> str:
+        """Run git command, return output."""
+        proc = subprocess.run(
+            ["git", *args], text=True, capture_output=True, timeout=10
+        )
+        if proc.returncode not in (0, 1):
+            proc.check_returncode()
+        return proc.stdout.strip()
 
     @classmethod
     def collect_git_info(cls, ignore_diff: bool = False) -> GitInfo:
         """Collect git repository information."""
-        head = cls.safe_git_command(["rev-parse", "HEAD"])
-        branch = cls.safe_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
-        remote = cls.safe_git_command(["remote", "get-url", "origin"])
+        head = cls.run_git_command(["rev-parse", "HEAD"])
+        branch = cls.run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
+        remote = cls.run_git_command(["remote", "get-url", "origin"])
 
         if ignore_diff:
             patch = "<ignored-diff>"
         else:
-            unstaged = cls.safe_git_command(["diff"])
-            staged = cls.safe_git_command(["diff", "--cached"])
-            untracked = cls.safe_git_command(
+            unstaged = cls.run_git_command(["diff"])
+            staged = cls.run_git_command(["diff", "--cached"])
+            untracked = cls.run_git_command(
                 ["ls-files", "--others", "--exclude-standard"]
             ).splitlines()
 
             untracked_patches = "\n".join(
-                cls.safe_git_command(["diff", "--no-index", "/dev/null", f])
+                cls.run_git_command(["diff", "--no-index", "/dev/null", f])
                 for f in untracked
             )
 
@@ -141,7 +137,7 @@ class MetadataManager:
                 )
 
         submodules: dict[str, str] = {}
-        for line in cls.safe_git_command(["submodule", "status"]).splitlines():
+        for line in cls.run_git_command(["submodule", "status"]).splitlines():
             parts = line.split()
             if len(parts) >= 2:
                 submodules[parts[1]] = parts[0]

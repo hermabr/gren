@@ -185,3 +185,4 @@ def test_experiment_summary_class_name(temp_huldra_root: Path) -> None:
     experiments = scan_experiments()
     assert len(experiments) == 1
     assert experiments[0].class_name == "MyModel"
+

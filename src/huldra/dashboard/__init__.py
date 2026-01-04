@@ -8,3 +8,4 @@ Run with: huldra-dashboard serve
 __version__ = "0.1.0"
 
 
+

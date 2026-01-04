@@ -162,3 +162,4 @@ def populated_huldra_root(temp_huldra_root: Path) -> Path:
     )
 
     return temp_huldra_root
+

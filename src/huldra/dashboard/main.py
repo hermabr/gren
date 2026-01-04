@@ -13,23 +13,22 @@ from fastapi.staticfiles import StaticFiles
 from .api.routes import router as api_router
 
 
-def get_frontend_dir() -> Path | None:
+def get_frontend_dir() -> Path:
     """Get frontend dist directory, works for installed package and development."""
     # Try importlib.resources (installed package)
-    try:
-        ref = importlib.resources.files("huldra.dashboard").joinpath("frontend/dist")
-        with importlib.resources.as_file(ref) as path:
-            if path.exists() and (path / "index.html").exists():
-                return path
-    except (TypeError, FileNotFoundError):
-        pass
+    ref = importlib.resources.files("huldra.dashboard").joinpath("frontend/dist")
+    with importlib.resources.as_file(ref) as path:
+        if path.exists() and (path / "index.html").exists():
+            return path
 
     # Fallback to relative path (development)
     dev_path = Path(__file__).parent / "frontend" / "dist"
     if dev_path.exists() and (dev_path / "index.html").exists():
         return dev_path
 
-    return None # TODO: Maybe i should throw here instead?
+    raise FileNotFoundError(
+        "Frontend dist directory not found. Run 'make frontend-build' to build the frontend."
+    )
 
 
 def create_app(*, serve_frontend: bool = False) -> FastAPI:
@@ -55,21 +54,20 @@ def create_app(*, serve_frontend: bool = False) -> FastAPI:
     # Serve frontend only if explicitly requested
     if serve_frontend:
         frontend_dir = get_frontend_dir()
-        if frontend_dir:
-            # Mount static assets
-            assets_dir = frontend_dir / "assets"
-            if assets_dir.exists():
-                app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
-            # SPA catch-all route
-            @app.get("/{full_path:path}")
-            async def serve_spa(full_path: str) -> FileResponse:
-                """Serve the React SPA for all non-API routes."""
-                assert frontend_dir is not None
-                file_path = frontend_dir / full_path
-                if file_path.is_file() and not full_path.startswith("api"):
-                    return FileResponse(file_path)
-                return FileResponse(frontend_dir / "index.html")
+        # Mount static assets
+        assets_dir = frontend_dir / "assets"
+        if assets_dir.exists():
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+        # SPA catch-all route
+        @app.get("/{full_path:path}")
+        async def serve_spa(full_path: str) -> FileResponse:
+            """Serve the React SPA for all non-API routes."""
+            file_path = frontend_dir / full_path
+            if file_path.is_file() and not full_path.startswith("api"):
+                return FileResponse(file_path)
+            return FileResponse(frontend_dir / "index.html")
 
     return app
 
@@ -125,5 +123,4 @@ def cli() -> None:
 
 if __name__ == "__main__":
     cli()
-
 

@@ -1,4 +1,3 @@
-import contextlib
 import datetime as _dt
 import json
 import os
@@ -268,10 +267,7 @@ class StateManager:
     def _parse_time(cls, value: str | None) -> _dt.datetime | None:
         if not isinstance(value, str) or not value:
             return None
-        try:
-            dt = _dt.datetime.fromisoformat(value)
-        except Exception:
-            return None
+        dt = _dt.datetime.fromisoformat(value)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=_dt.timezone.utc)
         return dt.astimezone(_dt.timezone.utc)
@@ -283,10 +279,10 @@ class StateManager:
     @classmethod
     def read_state(cls, directory: Path) -> _HuldraState:
         state_path = cls.get_state_path(directory)
-        try:
-            text = state_path.read_text()
-        except Exception:
+        if not state_path.is_file():
             return cls.default_state()
+
+        text = state_path.read_text()
 
         try:
             data = json.loads(text)
@@ -317,8 +313,11 @@ class StateManager:
         try:
             os.kill(pid, 0)
             return True
-        except Exception:
+        except ProcessLookupError:
             return False
+        except PermissionError:
+            # Process exists but we can't signal it - still alive
+            return True
 
     @classmethod
     def try_lock(cls, lock_path: Path) -> int | None:
@@ -338,20 +337,22 @@ class StateManager:
 
     @classmethod
     def release_lock(cls, fd: int | None, lock_path: Path) -> None:
-        with contextlib.suppress(Exception):
-            if fd is not None:
-                os.close(fd)
-        with contextlib.suppress(Exception):
-            lock_path.unlink(missing_ok=True)
+        if fd is not None:
+            os.close(fd)
+        lock_path.unlink(missing_ok=True)
 
     @classmethod
     def _read_lock_info(cls, lock_path: Path) -> _LockInfoDict | None:
-        try:
-            first = lock_path.read_text().strip().splitlines()[0]
-            data = json.loads(first)
-            return data if isinstance(data, dict) else None
-        except Exception:
+        if not lock_path.is_file():
             return None
+        text = lock_path.read_text().strip()
+        if not text:
+            return None
+        lines = text.splitlines()
+        if not lines:
+            return None
+        data = json.loads(lines[0])
+        return data if isinstance(data, dict) else None
 
     @classmethod
     def _acquire_lock_blocking(
@@ -374,14 +375,17 @@ class StateManager:
                 if isinstance(pid, int) and not cls._pid_alive(pid):
                     should_break = True
             if not should_break:
-                with contextlib.suppress(Exception):
-                    age = time.time() - lock_path.stat().st_mtime
+                try:
+                    stat_result = lock_path.stat()
+                    age = time.time() - stat_result.st_mtime
                     if age > stale_after_sec:
                         should_break = True
+                except FileNotFoundError:
+                    # Lock file was deleted by another process, retry
+                    pass
 
             if should_break:
-                with contextlib.suppress(Exception):
-                    lock_path.unlink(missing_ok=True)
+                lock_path.unlink(missing_ok=True)
                 continue
 
             if time.time() >= deadline:
@@ -415,10 +419,9 @@ class StateManager:
             "host": socket.gethostname(),
             **event,
         }
-        with contextlib.suppress(Exception):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(enriched) + "\n")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(enriched) + "\n")
 
     @classmethod
     def write_success_marker(cls, directory: Path, *, attempt_id: str) -> None:
@@ -886,6 +889,5 @@ class StateManager:
             "cancelled",
             "preempted",
         }:
-            with contextlib.suppress(Exception):
-                cls.get_lock_path(directory, cls.COMPUTE_LOCK).unlink(missing_ok=True)
+            cls.get_lock_path(directory, cls.COMPUTE_LOCK).unlink(missing_ok=True)
         return state

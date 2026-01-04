@@ -57,3 +57,4 @@ async def get_experiment(namespace: str, huldra_hash: str) -> ExperimentDetail:
 async def dashboard_stats() -> DashboardStats:
     """Get aggregate statistics for the dashboard."""
     return get_stats()
+
