@@ -1,9 +1,17 @@
 import json
 import socket
+import threading
+import time
 
 import huldra
 import pytest
-from huldra.storage.state import _StateResultAbsent, _StateResultIncomplete
+from huldra.errors import HuldraLockNotAcquired, HuldraWaitTimeout
+from huldra.storage.state import (
+    _StateResultAbsent,
+    _StateResultIncomplete,
+    _StateResultSuccess,
+    compute_lock,
+)
 
 
 def test_state_default_and_attempt_lifecycle(huldra_tmp_root, tmp_path) -> None:
@@ -161,3 +169,298 @@ def test_state_warns_when_restart_after_stale_pid(
         "state: restarting after stale attempt (pid_dead)"
         in (huldra.HULDRA_CONFIG.base_root / "huldra.log").read_text()
     )
+
+
+# --- compute_lock context manager tests ---
+
+
+def test_compute_lock_acquires_lock_and_records_attempt(
+    huldra_tmp_root, tmp_path
+) -> None:
+    """Test that compute_lock atomically acquires lock and records attempt."""
+    directory = tmp_path / "obj"
+    directory.mkdir()
+
+    with compute_lock(
+        directory,
+        backend="local",
+        lease_duration_sec=60.0,
+        heartbeat_interval_sec=10.0,
+        owner={"pid": 12345, "host": "test-host", "user": "test-user"},
+    ) as ctx:
+        # Lock file should exist
+        lock_path = huldra.StateManager.get_lock_path(
+            directory, huldra.StateManager.COMPUTE_LOCK
+        )
+        assert lock_path.exists()
+
+        # Attempt should be recorded
+        state = huldra.StateManager.read_state(directory)
+        assert state.attempt is not None
+        assert state.attempt.id == ctx.attempt_id
+        assert state.attempt.status == "running"
+        assert isinstance(state.result, _StateResultIncomplete)
+
+    # After exiting, lock should be released
+    assert not lock_path.exists()
+
+
+def test_compute_lock_releases_on_exception(huldra_tmp_root, tmp_path) -> None:
+    """Test that compute_lock releases lock even when exception is raised."""
+    directory = tmp_path / "obj"
+    directory.mkdir()
+
+    lock_path = huldra.StateManager.get_lock_path(
+        directory, huldra.StateManager.COMPUTE_LOCK
+    )
+
+    with pytest.raises(ValueError, match="test error"):
+        with compute_lock(
+            directory,
+            backend="local",
+            lease_duration_sec=60.0,
+            heartbeat_interval_sec=10.0,
+            owner={"pid": 12345, "host": "test-host", "user": "test-user"},
+        ):
+            raise ValueError("test error")
+
+    # Lock should be released even after exception
+    assert not lock_path.exists()
+
+
+def test_compute_lock_cleans_orphaned_lock(huldra_tmp_root, tmp_path) -> None:
+    """Test that compute_lock cleans up orphaned lock files (lock exists but no active attempt)."""
+    directory = tmp_path / "obj"
+    directory.mkdir()
+
+    # Create an orphaned lock file (no corresponding attempt in state)
+    lock_path = huldra.StateManager.get_lock_path(
+        directory, huldra.StateManager.COMPUTE_LOCK
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps(
+            {
+                "pid": 99999,
+                "host": "old-host",
+                "created_at": "2020-01-01T00:00:00+00:00",
+                "lock_id": "orphaned",
+            }
+        )
+        + "\n"
+    )
+
+    # compute_lock should detect orphaned lock and clean it up
+    with compute_lock(
+        directory,
+        backend="local",
+        lease_duration_sec=60.0,
+        heartbeat_interval_sec=10.0,
+        owner={"pid": 12345, "host": "test-host", "user": "test-user"},
+    ) as ctx:
+        # Should have acquired lock successfully
+        assert ctx.attempt_id is not None
+        state = huldra.StateManager.read_state(directory)
+        assert state.attempt is not None
+        assert state.attempt.status == "running"
+
+
+def test_compute_lock_raises_on_success_state(huldra_tmp_root, tmp_path) -> None:
+    """Test that compute_lock raises HuldraLockNotAcquired if experiment already succeeded."""
+    directory = tmp_path / "obj"
+    directory.mkdir()
+
+    # Create a successful state
+    attempt_id = huldra.StateManager.start_attempt_running(
+        directory,
+        backend="local",
+        lease_duration_sec=60.0,
+        owner={"pid": 12345, "host": "test-host", "user": "test-user"},
+    )
+    huldra.StateManager.write_success_marker(directory, attempt_id=attempt_id)
+    huldra.StateManager.finish_attempt_success(directory, attempt_id=attempt_id)
+
+    # Verify state is success
+    state = huldra.StateManager.read_state(directory)
+    assert isinstance(state.result, _StateResultSuccess)
+
+    # Create a lock file to simulate contention
+    lock_path = huldra.StateManager.get_lock_path(
+        directory, huldra.StateManager.COMPUTE_LOCK
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps({"pid": 99999, "host": "x", "created_at": "x", "lock_id": "x"})
+        + "\n"
+    )
+
+    with pytest.raises(HuldraLockNotAcquired, match="already succeeded"):
+        with compute_lock(
+            directory,
+            backend="local",
+            lease_duration_sec=60.0,
+            heartbeat_interval_sec=10.0,
+            owner={"pid": 12345, "host": "test-host", "user": "test-user"},
+        ):
+            pass
+
+
+def test_compute_lock_timeout(huldra_tmp_root, tmp_path) -> None:
+    """Test that compute_lock raises HuldraWaitTimeout when max_wait_time_sec is exceeded."""
+    directory = tmp_path / "obj"
+    directory.mkdir()
+
+    # Start an attempt that holds the lock (simulating another process)
+    huldra.StateManager.start_attempt_running(
+        directory,
+        backend="local",
+        lease_duration_sec=60.0,  # Long lease so it won't expire
+        owner={"pid": 99999, "host": "other-host", "user": "other-user"},
+    )
+
+    # Acquire the actual lock file
+    lock_path = huldra.StateManager.get_lock_path(
+        directory, huldra.StateManager.COMPUTE_LOCK
+    )
+    lock_fd = huldra.StateManager.try_lock(lock_path)
+    assert lock_fd is not None
+
+    try:
+        # Try to acquire with a very short timeout
+        with pytest.raises(HuldraWaitTimeout, match="Timed out"):
+            with compute_lock(
+                directory,
+                backend="local",
+                lease_duration_sec=60.0,
+                heartbeat_interval_sec=10.0,
+                owner={"pid": 12345, "host": "test-host", "user": "test-user"},
+                max_wait_time_sec=0.1,
+                poll_interval_sec=0.05,
+            ):
+                pass
+    finally:
+        huldra.StateManager.release_lock(lock_fd, lock_path)
+
+
+def test_compute_lock_is_exclusive(huldra_tmp_root, tmp_path) -> None:
+    """Test that two concurrent compute_lock calls are mutually exclusive."""
+    directory = tmp_path / "obj"
+    directory.mkdir()
+
+    results: list[str] = []
+    errors: list[Exception] = []
+
+    def worker(worker_id: str, delay_before_release: float) -> None:
+        try:
+            with compute_lock(
+                directory,
+                backend="local",
+                lease_duration_sec=60.0,
+                heartbeat_interval_sec=10.0,
+                owner={"pid": 12345, "host": f"host-{worker_id}", "user": "test-user"},
+                max_wait_time_sec=5.0,
+                poll_interval_sec=0.01,
+                reconcile_fn=lambda d: huldra.StateManager.reconcile(d),
+            ):
+                results.append(f"{worker_id}-acquired")
+                time.sleep(delay_before_release)
+                results.append(f"{worker_id}-released")
+        except Exception as e:
+            errors.append(e)
+
+    # Start first worker
+    t1 = threading.Thread(target=worker, args=("A", 0.2))
+    t1.start()
+
+    # Give first worker time to acquire lock
+    time.sleep(0.05)
+
+    # Start second worker - should block until first releases
+    t2 = threading.Thread(target=worker, args=("B", 0.1))
+    t2.start()
+
+    t1.join()
+    t2.join()
+
+    assert not errors, f"Unexpected errors: {errors}"
+
+    # Verify mutual exclusion: A should fully complete before B starts
+    assert results == ["A-acquired", "A-released", "B-acquired", "B-released"], (
+        f"Expected sequential execution but got: {results}"
+    )
+
+
+def test_compute_lock_waits_for_active_attempt(huldra_tmp_root, tmp_path) -> None:
+    """Test that compute_lock waits for an active attempt and lock to be released."""
+    directory = tmp_path / "obj"
+    directory.mkdir()
+
+    # Start an attempt with a long lease on a different host (so reconcile can't detect it as dead)
+    huldra.StateManager.start_attempt_running(
+        directory,
+        backend="local",
+        lease_duration_sec=60.0,  # Long lease
+        owner={"pid": 99999, "host": "other-host", "user": "other-user"},
+    )
+
+    # Acquire the lock (simulating the other process)
+    lock_path = huldra.StateManager.get_lock_path(
+        directory, huldra.StateManager.COMPUTE_LOCK
+    )
+    lock_fd = huldra.StateManager.try_lock(lock_path)
+    assert lock_fd is not None
+
+    # Release lock in a background thread after a short delay
+    def release_later():
+        time.sleep(0.1)
+        huldra.StateManager.release_lock(lock_fd, lock_path)
+
+    release_thread = threading.Thread(target=release_later)
+    release_thread.start()
+
+    # compute_lock should wait and eventually acquire
+    start = time.time()
+    with compute_lock(
+        directory,
+        backend="local",
+        lease_duration_sec=60.0,
+        heartbeat_interval_sec=10.0,
+        owner={"pid": 12345, "host": "test-host", "user": "test-user"},
+        max_wait_time_sec=5.0,
+        poll_interval_sec=0.02,
+        reconcile_fn=lambda d: huldra.StateManager.reconcile(d),
+    ) as ctx:
+        elapsed = time.time() - start
+        # Should have waited for the lock (at least 0.05s, probably ~0.1s)
+        assert elapsed >= 0.05
+        assert ctx.attempt_id is not None
+
+    release_thread.join()
+
+
+def test_compute_lock_heartbeat_runs(huldra_tmp_root, tmp_path) -> None:
+    """Test that the heartbeat thread updates the lease while lock is held."""
+    directory = tmp_path / "obj"
+    directory.mkdir()
+
+    with compute_lock(
+        directory,
+        backend="local",
+        lease_duration_sec=0.5,
+        heartbeat_interval_sec=0.05,  # Heartbeat every 50ms
+        owner={"pid": 12345, "host": "test-host", "user": "test-user"},
+    ):
+        state_before = huldra.StateManager.read_state(directory)
+        assert state_before.attempt is not None
+        assert state_before.attempt.status == "running"
+        initial_lease_expires = state_before.attempt.lease_expires_at  # type: ignore[union-attr]
+
+        # Wait long enough for heartbeat to update (need >1 second for ISO timestamp change)
+        time.sleep(1.1)
+
+        state_after = huldra.StateManager.read_state(directory)
+        assert state_after.attempt is not None
+        updated_lease_expires = state_after.attempt.lease_expires_at  # type: ignore[union-attr]
+
+        # Lease expiry should have been extended by heartbeat
+        assert updated_lease_expires != initial_lease_expires

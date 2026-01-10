@@ -24,11 +24,13 @@ pip install huldra
 
 ## Quickstart
 
-1) Subclass `huldra.Huldra[T]`
-2) Implement:
+1. Subclass `huldra.Huldra[T]`
+2. Implement:
+
 - `_create(self) -> T` (compute and write outputs into `self.huldra_dir`)
 - `_load(self) -> T` (load outputs back from `self.huldra_dir`)
-3) Call `load_or_create()`
+
+3. Call `load_or_create()`
 
 Example (define the pipeline in an importable module, and call it from a separate script):
 
@@ -128,11 +130,11 @@ Huldra also exposes a shared “raw” directory:
 
 - `self.raw_dir == huldra.HULDRA_CONFIG.raw_dir` (defaults to `<HULDRA_PATH>/raw`)
 
-Use this for large, non-versioned inputs/outputs. If you want per-object isolation, create a subfolder yourself, e.g. `self.raw_dir / self.hexdigest / "file.ext"`.
+Use this for large, non-versioned inputs/outputs. If you want per-object isolation, create a subfolder yourself, e.g. `self.raw_dir / self._huldra_hash / "file.ext"`.
 
 ## Logging (Hydra-style)
 
-Huldra installs stdlib `logging` handlers on the *root logger*:
+Huldra installs stdlib `logging` handlers on the _root logger_:
 
 - `current_holder.huldra_dir / ".huldra" / "huldra.log"` while a holder is active
 

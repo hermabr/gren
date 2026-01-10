@@ -1,6 +1,5 @@
 import traceback
 from pathlib import Path
-from typing import Optional, Self
 
 
 class _HuldraMissing:
@@ -8,7 +7,7 @@ class _HuldraMissing:
 
     __slots__ = ()
 
-    def __repr__(self: Self) -> str:
+    def __repr__(self) -> str:
         return "Huldra.MISSING"
 
 
@@ -27,6 +26,12 @@ class HuldraWaitTimeout(HuldraError):
     pass
 
 
+class HuldraLockNotAcquired(HuldraError):
+    """Raised when a compute lock cannot be acquired (someone else holds it)."""
+
+    pass
+
+
 class HuldraComputeError(HuldraError):
     """Raised when computation fails."""
 
@@ -34,13 +39,13 @@ class HuldraComputeError(HuldraError):
         self,
         message: str,
         state_path: Path,
-        original_error: Optional[Exception] = None,
+        original_error: Exception | None = None,
     ):
         self.state_path = state_path
         self.original_error = original_error
         super().__init__(message)
 
-    def __str__(self: Self) -> str:
+    def __str__(self) -> str:
         msg = super().__str__()  # ty: ignore[invalid-super-argument]
         if self.original_error:
             msg += f"\n\nOriginal error: {self.original_error}"

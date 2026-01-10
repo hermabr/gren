@@ -1,14 +1,58 @@
-import contextlib
 import datetime as _dt
 import json
 import os
 import socket
+import threading
 import time
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Callable, Literal, Optional
+from typing import Annotated, Any, Callable, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from ..errors import HuldraLockNotAcquired, HuldraWaitTimeout
+
+
+# Type alias for scheduler-specific metadata. Different schedulers (SLURM, LSF, PBS, local)
+# return different fields, so this must remain dynamic.
+SchedulerMetadata = dict[str, Any]
+
+# Type alias for probe results from submitit adapter
+ProbeResult = dict[str, Any]
+
+
+class _LockInfoDict(TypedDict, total=False):
+    """TypedDict for lock file information."""
+
+    pid: int
+    host: str
+    created_at: str
+    lock_id: str
+
+
+class _OwnerDict(TypedDict, total=False):
+    """TypedDict for owner information passed to state manager functions."""
+
+    pid: int | None
+    host: str | None
+    hostname: str | None
+    user: str | None
+    command: str | None
+    timestamp: str | None
+    python_version: str | None
+    executable: str | None
+    platform: str | None
+
+
+class _ErrorDict(TypedDict, total=False):
+    """TypedDict for error information passed to state manager functions."""
+
+    type: str
+    message: str
+    traceback: str | None
 
 
 class _StateResultBase(BaseModel):
@@ -43,7 +87,7 @@ _StateResult = Annotated[
 ]
 
 
-def _coerce_result(current: _StateResult, **updates: Any) -> _StateResult:
+def _coerce_result(current: _StateResult, **updates: str) -> _StateResult:
     data = current.model_dump(mode="json")
     data.update(updates)
     status = data.get("status")
@@ -63,7 +107,9 @@ def _coerce_result(current: _StateResult, **updates: Any) -> _StateResult:
             raise ValueError(f"Invalid result status: {status!r}")
 
 
-class _StateOwner(BaseModel):
+class StateOwner(BaseModel):
+    """Owner information for a Huldra attempt."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True, strict=True)
 
     pid: int | None = None
@@ -78,7 +124,9 @@ class _StateOwner(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _normalize_host_keys(cls, data: Any) -> Any:
+    def _normalize_host_keys(
+        cls, data: dict[str, str | int | None] | Any
+    ) -> dict[str, str | int | None] | Any:
         if not isinstance(data, dict):
             return data
         host = data.get("host")
@@ -93,7 +141,9 @@ class _StateOwner(BaseModel):
         return data
 
 
-class _HuldraErrorState(BaseModel):
+class HuldraErrorState(BaseModel):
+    """Error state information for a Huldra attempt."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True, strict=True)
 
     type: str = "UnknownError"
@@ -112,8 +162,8 @@ class _StateAttemptBase(BaseModel):
     heartbeat_at: str
     lease_duration_sec: float
     lease_expires_at: str
-    owner: _StateOwner
-    scheduler: dict[str, Any] = Field(default_factory=dict)
+    owner: StateOwner
+    scheduler: SchedulerMetadata = Field(default_factory=dict)
 
 
 class _StateAttemptQueued(_StateAttemptBase):
@@ -133,14 +183,14 @@ class _StateAttemptSuccess(_StateAttemptBase):
 class _StateAttemptFailed(_StateAttemptBase):
     status: Literal["failed"] = "failed"
     ended_at: str
-    error: _HuldraErrorState
+    error: HuldraErrorState
     reason: str | None = None
 
 
 class _StateAttemptTerminal(_StateAttemptBase):
     status: Literal["cancelled", "preempted", "crashed"]
     ended_at: str
-    error: _HuldraErrorState | None = None
+    error: HuldraErrorState | None = None
     reason: str | None = None
 
 
@@ -152,6 +202,51 @@ _StateAttempt = Annotated[
     | _StateAttemptTerminal,
     Field(discriminator="status"),
 ]
+
+
+class StateAttempt(BaseModel):
+    """
+    Public read-only representation of a Huldra attempt.
+
+    This model is used for external APIs (like the dashboard) to expose
+    attempt information without coupling to internal state variants.
+    All fields that may not be present on all attempt types are optional.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    id: str
+    number: int
+    backend: str
+    status: str
+    started_at: str
+    heartbeat_at: str
+    lease_duration_sec: float
+    lease_expires_at: str
+    owner: StateOwner
+    scheduler: SchedulerMetadata = Field(default_factory=dict)
+    ended_at: str | None = None
+    error: HuldraErrorState | None = None
+    reason: str | None = None
+
+    @classmethod
+    def from_internal(cls, attempt: _StateAttempt) -> "StateAttempt":
+        """Create a StateAttempt from an internal attempt state."""
+        return cls(
+            id=attempt.id,
+            number=attempt.number,
+            backend=attempt.backend,
+            status=attempt.status,
+            started_at=attempt.started_at,
+            heartbeat_at=attempt.heartbeat_at,
+            lease_duration_sec=attempt.lease_duration_sec,
+            lease_expires_at=attempt.lease_expires_at,
+            owner=attempt.owner,
+            scheduler=attempt.scheduler,
+            ended_at=getattr(attempt, "ended_at", None),
+            error=getattr(attempt, "error", None),
+            reason=getattr(attempt, "reason", None),
+        )
 
 
 class _HuldraState(BaseModel):
@@ -224,13 +319,10 @@ class StateManager:
         return cls._utcnow().isoformat(timespec="seconds")
 
     @classmethod
-    def _parse_time(cls, value: Any) -> Optional[_dt.datetime]:
+    def _parse_time(cls, value: str | None) -> _dt.datetime | None:
         if not isinstance(value, str) or not value:
             return None
-        try:
-            dt = _dt.datetime.fromisoformat(value)
-        except Exception:
-            return None
+        dt = _dt.datetime.fromisoformat(value)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=_dt.timezone.utc)
         return dt.astimezone(_dt.timezone.utc)
@@ -242,10 +334,10 @@ class StateManager:
     @classmethod
     def read_state(cls, directory: Path) -> _HuldraState:
         state_path = cls.get_state_path(directory)
-        try:
-            text = state_path.read_text()
-        except Exception:
+        if not state_path.is_file():
             return cls.default_state()
+
+        text = state_path.read_text()
 
         try:
             data = json.loads(text)
@@ -276,11 +368,14 @@ class StateManager:
         try:
             os.kill(pid, 0)
             return True
-        except Exception:
+        except ProcessLookupError:
             return False
+        except PermissionError:
+            # Process exists but we can't signal it - still alive
+            return True
 
     @classmethod
-    def try_lock(cls, lock_path: Path) -> Optional[int]:
+    def try_lock(cls, lock_path: Path) -> int | None:
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o644)
@@ -296,21 +391,23 @@ class StateManager:
             return None
 
     @classmethod
-    def release_lock(cls, fd: Optional[int], lock_path: Path) -> None:
-        with contextlib.suppress(Exception):
-            if fd is not None:
-                os.close(fd)
-        with contextlib.suppress(Exception):
-            lock_path.unlink(missing_ok=True)
+    def release_lock(cls, fd: int | None, lock_path: Path) -> None:
+        if fd is not None:
+            os.close(fd)
+        lock_path.unlink(missing_ok=True)
 
     @classmethod
-    def _read_lock_info(cls, lock_path: Path) -> dict[str, Any] | None:
-        try:
-            first = lock_path.read_text().strip().splitlines()[0]
-            data = json.loads(first)
-            return data if isinstance(data, dict) else None
-        except Exception:
+    def _read_lock_info(cls, lock_path: Path) -> _LockInfoDict | None:
+        if not lock_path.is_file():
             return None
+        text = lock_path.read_text().strip()
+        if not text:
+            return None
+        lines = text.splitlines()
+        if not lines:
+            return None
+        data = json.loads(lines[0])
+        return data if isinstance(data, dict) else None
 
     @classmethod
     def _acquire_lock_blocking(
@@ -333,14 +430,17 @@ class StateManager:
                 if isinstance(pid, int) and not cls._pid_alive(pid):
                     should_break = True
             if not should_break:
-                with contextlib.suppress(Exception):
-                    age = time.time() - lock_path.stat().st_mtime
+                try:
+                    stat_result = lock_path.stat()
+                    age = time.time() - stat_result.st_mtime
                     if age > stale_after_sec:
                         should_break = True
+                except FileNotFoundError:
+                    # Lock file was deleted by another process, retry
+                    pass
 
             if should_break:
-                with contextlib.suppress(Exception):
-                    lock_path.unlink(missing_ok=True)
+                lock_path.unlink(missing_ok=True)
                 continue
 
             if time.time() >= deadline:
@@ -352,7 +452,7 @@ class StateManager:
         cls, directory: Path, mutator: Callable[[_HuldraState], None]
     ) -> _HuldraState:
         lock_path = cls.get_lock_path(directory, cls.STATE_LOCK)
-        fd: Optional[int] = None
+        fd: int | None = None
         try:
             fd = cls._acquire_lock_blocking(lock_path)
             state = cls.read_state(directory)
@@ -366,7 +466,7 @@ class StateManager:
             cls.release_lock(fd, lock_path)
 
     @classmethod
-    def append_event(cls, directory: Path, event: dict[str, Any]) -> None:
+    def append_event(cls, directory: Path, event: dict[str, str | int]) -> None:
         path = cls.get_events_path(directory)
         enriched = {
             "ts": cls._iso_now(),
@@ -374,10 +474,9 @@ class StateManager:
             "host": socket.gethostname(),
             **event,
         }
-        with contextlib.suppress(Exception):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(enriched) + "\n")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(enriched) + "\n")
 
     @classmethod
     def write_success_marker(cls, directory: Path, *, attempt_id: str) -> None:
@@ -408,8 +507,8 @@ class StateManager:
         *,
         backend: str,
         lease_duration_sec: float,
-        owner: dict[str, Any],
-        scheduler: dict[str, Any] | None = None,
+        owner: _OwnerDict,
+        scheduler: SchedulerMetadata | None = None,
     ) -> str:
         return cls._start_attempt(
             directory,
@@ -427,8 +526,8 @@ class StateManager:
         *,
         backend: str,
         lease_duration_sec: float,
-        owner: dict[str, Any],
-        scheduler: dict[str, Any] | None = None,
+        owner: _OwnerDict,
+        scheduler: SchedulerMetadata | None = None,
     ) -> str:
         return cls._start_attempt(
             directory,
@@ -446,8 +545,8 @@ class StateManager:
         *,
         backend: str,
         lease_duration_sec: float,
-        owner: dict[str, Any],
-        scheduler: dict[str, Any] | None,
+        owner: _OwnerDict,
+        scheduler: SchedulerMetadata | None,
         attempt_cls: type[_StateAttemptQueued] | type[_StateAttemptRunning],
     ) -> str:
         attempt_id = uuid.uuid4().hex
@@ -467,12 +566,12 @@ class StateManager:
 
             number = (prev.number + 1) if prev is not None else 1
 
-            owner_state = _StateOwner.model_validate(owner)
+            owner_state = StateOwner.model_validate(owner)
             started_at = now.isoformat(timespec="seconds")
             heartbeat_at = started_at
             lease_duration = float(lease_duration_sec)
             lease_expires_at = expires.isoformat(timespec="seconds")
-            scheduler_state: dict[str, Any] = scheduler or {}
+            scheduler_state: SchedulerMetadata = scheduler or {}
 
             attempt_common = dict(
                 id=attempt_id,
@@ -550,7 +649,7 @@ class StateManager:
 
     @classmethod
     def set_attempt_fields(
-        cls, directory: Path, *, attempt_id: str, fields: dict[str, Any]
+        cls, directory: Path, *, attempt_id: str, fields: SchedulerMetadata
     ) -> bool:
         ok = False
 
@@ -605,11 +704,11 @@ class StateManager:
         directory: Path,
         *,
         attempt_id: str,
-        error: dict[str, Any],
+        error: _ErrorDict,
     ) -> None:
         now = cls._iso_now()
 
-        error_state = _HuldraErrorState.model_validate(error)
+        error_state = HuldraErrorState.model_validate(error)
 
         def mutate(state: _HuldraState) -> None:
             attempt = state.attempt
@@ -642,11 +741,11 @@ class StateManager:
         directory: Path,
         *,
         attempt_id: str,
-        error: dict[str, Any],
+        error: _ErrorDict,
         reason: str | None = None,
     ) -> None:
         now = cls._iso_now()
-        error_state = _HuldraErrorState.model_validate(error)
+        error_state = HuldraErrorState.model_validate(error)
 
         def mutate(state: _HuldraState) -> None:
             attempt = state.attempt
@@ -681,7 +780,7 @@ class StateManager:
     @classmethod
     def _local_attempt_alive(
         cls, attempt: _StateAttemptQueued | _StateAttemptRunning
-    ) -> Optional[bool]:
+    ) -> bool | None:
         host = attempt.owner.host
         pid = attempt.owner.pid
         if host != socket.gethostname():
@@ -695,7 +794,7 @@ class StateManager:
         cls,
         directory: Path,
         *,
-        submitit_probe: Optional[Callable[[_HuldraState], dict[str, Any]]] = None,
+        submitit_probe: Callable[[_HuldraState], ProbeResult] | None = None,
     ) -> _HuldraState:
         """
         Reconcile a possibly-stale running/queued attempt.
@@ -781,7 +880,7 @@ class StateManager:
                     owner=attempt.owner,
                     scheduler=attempt.scheduler,
                     ended_at=now,
-                    error=_HuldraErrorState(
+                    error=HuldraErrorState(
                         type="HuldraComputeError", message=reason or ""
                     ),
                     reason=reason,
@@ -845,6 +944,158 @@ class StateManager:
             "cancelled",
             "preempted",
         }:
-            with contextlib.suppress(Exception):
-                cls.get_lock_path(directory, cls.COMPUTE_LOCK).unlink(missing_ok=True)
+            cls.get_lock_path(directory, cls.COMPUTE_LOCK).unlink(missing_ok=True)
         return state
+
+
+@dataclass
+class ComputeLockContext:
+    """Context returned when a compute lock is successfully acquired."""
+
+    attempt_id: str
+    stop_heartbeat: Callable[[], None]
+
+
+@contextmanager
+def compute_lock(
+    directory: Path,
+    *,
+    backend: str,
+    lease_duration_sec: float,
+    heartbeat_interval_sec: float,
+    owner: _OwnerDict,
+    scheduler: SchedulerMetadata | None = None,
+    max_wait_time_sec: float | None = None,
+    poll_interval_sec: float = 10.0,
+    wait_log_every_sec: float = 10.0,
+    reconcile_fn: Callable[[Path], None] | None = None,
+) -> Generator[ComputeLockContext, None, None]:
+    """
+    Context manager that atomically acquires lock + records attempt + starts heartbeat.
+
+    This ensures there can never be a mismatch between the lock file and state:
+    - Lock acquisition and attempt recording happen together
+    - Heartbeat starts immediately after attempt is recorded
+    - On exit, heartbeat is stopped and lock is released
+
+    The context manager handles the wait loop internally, blocking until the lock
+    is acquired or timeout is reached.
+
+    Args:
+        directory: The huldra directory for this experiment
+        backend: Backend type (e.g., "local", "submitit")
+        lease_duration_sec: Duration of the lease in seconds
+        heartbeat_interval_sec: Interval between heartbeats in seconds
+        owner: Owner information (pid, host, user, etc.)
+        scheduler: Optional scheduler metadata
+        max_wait_time_sec: Maximum time to wait for lock (None = wait forever)
+        poll_interval_sec: Interval between lock acquisition attempts
+        wait_log_every_sec: Interval between "waiting for lock" log messages
+        reconcile_fn: Optional function to call to reconcile stale attempts
+
+    Yields:
+        ComputeLockContext with attempt_id and stop_heartbeat callable
+
+    Raises:
+        HuldraLockNotAcquired: If lock cannot be acquired (after waiting)
+        HuldraWaitTimeout: If max_wait_time_sec is exceeded
+    """
+    lock_path = StateManager.get_lock_path(directory, StateManager.COMPUTE_LOCK)
+
+    lock_fd: int | None = None
+    start_time = time.time()
+    next_wait_log_at = 0.0
+
+    # Import here to avoid circular import
+    from ..runtime import get_logger
+
+    logger = get_logger()
+
+    # Wait loop to acquire lock
+    while lock_fd is None:
+        # Check timeout
+        if max_wait_time_sec is not None:
+            elapsed = time.time() - start_time
+            if elapsed > max_wait_time_sec:
+                raise HuldraWaitTimeout(
+                    f"Timed out waiting for compute lock after {elapsed:.1f}s"
+                )
+
+        lock_fd = StateManager.try_lock(lock_path)
+        if lock_fd is not None:
+            break
+
+        # Lock held by someone else - reconcile and check state
+        if reconcile_fn is not None:
+            reconcile_fn(directory)
+
+        state = StateManager.read_state(directory)
+        attempt = state.attempt
+
+        # If result is terminal, no point waiting
+        if isinstance(state.result, _StateResultSuccess):
+            raise HuldraLockNotAcquired(
+                "Cannot acquire lock: experiment already succeeded"
+            )
+        if isinstance(state.result, _StateResultFailed):
+            raise HuldraLockNotAcquired(
+                "Cannot acquire lock: experiment already failed"
+            )
+
+        # If no active attempt but lock exists, it's orphaned - clean it up
+        if attempt is None or isinstance(
+            attempt,
+            (
+                _StateAttemptSuccess,
+                _StateAttemptFailed,
+                _StateAttemptTerminal,
+            ),
+        ):
+            # Orphaned lock file - remove it and retry immediately
+            lock_path.unlink(missing_ok=True)
+            continue
+
+        # Active attempt exists - wait for it
+        now = time.time()
+        if now >= next_wait_log_at:
+            logger.info(
+                "compute_lock: waiting for lock %s",
+                directory,
+            )
+            next_wait_log_at = now + wait_log_every_sec
+        time.sleep(poll_interval_sec)
+
+    # Lock acquired - now atomically record attempt and start heartbeat
+    stop_event = threading.Event()
+    attempt_id: str | None = None
+
+    try:
+        # Record attempt IMMEDIATELY to minimize orphan window
+        attempt_id = StateManager.start_attempt_running(
+            directory,
+            backend=backend,
+            lease_duration_sec=lease_duration_sec,
+            owner=owner,
+            scheduler=scheduler,
+        )
+
+        # Start heartbeat IMMEDIATELY
+        def heartbeat() -> None:
+            while not stop_event.wait(heartbeat_interval_sec):
+                StateManager.heartbeat(
+                    directory,
+                    attempt_id=attempt_id,  # type: ignore[arg-type]
+                    lease_duration_sec=lease_duration_sec,
+                )
+
+        thread = threading.Thread(target=heartbeat, daemon=True)
+        thread.start()
+
+        yield ComputeLockContext(
+            attempt_id=attempt_id,
+            stop_heartbeat=stop_event.set,
+        )
+    finally:
+        # Always stop heartbeat and release lock
+        stop_event.set()
+        StateManager.release_lock(lock_fd, lock_path)

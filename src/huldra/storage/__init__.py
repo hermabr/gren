@@ -1,4 +1,27 @@
-from .metadata import MetadataManager
-from .state import StateManager
+from .metadata import (
+    EnvironmentInfo,
+    GitInfo,
+    HuldraMetadata,
+    MetadataManager,
+)
+from .state import (
+    ComputeLockContext,
+    HuldraErrorState,
+    StateAttempt,
+    StateManager,
+    StateOwner,
+    compute_lock,
+)
 
-__all__ = ["MetadataManager", "StateManager"]
+__all__ = [
+    "ComputeLockContext",
+    "EnvironmentInfo",
+    "GitInfo",
+    "HuldraErrorState",
+    "HuldraMetadata",
+    "MetadataManager",
+    "StateAttempt",
+    "StateManager",
+    "StateOwner",
+    "compute_lock",
+]

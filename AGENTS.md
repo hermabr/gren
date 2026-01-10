@@ -1,52 +1,261 @@
-# Repository Guidelines
+# Repository Guidelines for AI Agents
 
-## Project Structure & Module Organization
+## Critical Rules
 
-- Source code lives in `src/huldra/` (package is split across modules; `src/huldra/__init__.py` is a thin re-export layer).
-- Key subpackages:
-  - `src/huldra/core/`: `Huldra` and `HuldraList`
-  - `src/huldra/storage/`: `StateManager`, `MetadataManager`
-  - `src/huldra/serialization/`: `HuldraSerializer` (+ optional pydantic support)
-  - `src/huldra/runtime/`: scoped logging, `.env` loading, tracebacks
-  - `src/huldra/adapters/`: integrations like `SubmititAdapter`
-- This repo uses a “src layout”; import the package as `huldra`, not from the repo root.
-- Tests live in `tests/` at the repo root (pytest).
-- Runnable examples live in `examples/`.
+**DO NOT USE** the following patterns in this codebase:
+- `typing.Optional` - Use `X | None` instead
+- `typing.Any` - Only acceptable when the type is truly unknowable at compile time (e.g., deserializing arbitrary JSON, interacting with untyped third-party libraries). Always prefer protocols, generics, or concrete types.
+- `object` as a type annotation - Use specific types, protocols, or generics instead
+- `dict` without specific value types - Use Pydantic models, dataclasses, or TypedDict instead of `dict[str, Any]` or `dict[str, object]`. Simple dicts like `dict[str, str]` or `dict[str, int]` should also be avoided if it is possible to know exactly what the keys and structure of the data is.
+- `try/except` for error recovery - Prefer happy path and let errors crash; only use try/except for cleanup or resource management
+- Backward compatibility shims or aliases - Do not add backward compatibility code; refactor all usages directly
 
-## Build, Test, and Development Commands
+**ALWAYS** use `make` commands rather than running tools directly:
+- `make lint` not `uv run ruff check && uv run ty check`
+- `make test` not `uv run pytest`
+- `make check` for both lint and test
 
-This project is managed with `uv` (`uv.lock` is committed).
+**AFTER** making changes, verify your work:
+- For type/import changes: run `make lint`
+- For logic/behavior changes: run `make test` or `make test-all` or `make dashboard-test` or `make dashboard-test-e2e`
 
-- Install dependencies: `uv sync`
-- Run a one-off command in the locked env: `uv run python -c "import huldra; print(huldra.__name__)"`
-- Lint: `uv run ruff check .`
-- Type check: `uv run ty check`
-- Run tests: `uv run pytest`
-- Build distributions (wheel/sdist): `uv build`
-- Run examples: `uv run python examples/run_train.py`
+---
 
-If you don’t use `uv`, you can still use standard tooling, but keep `pyproject.toml` and `uv.lock` in sync.
+## Project Structure
 
-## Coding Style & Naming Conventions
+```
+src/huldra/           # Main package (src layout - import as `huldra`)
+  core/               # Huldra and HuldraList classes
+  storage/            # StateManager, MetadataManager
+  serialization/      # HuldraSerializer (+ pydantic support)
+  runtime/            # Scoped logging, .env loading, tracebacks
+  adapters/           # Integrations (SubmititAdapter)
+  dashboard/          # FastAPI dashboard (optional)
+tests/                # pytest tests
+examples/             # Runnable examples
+dashboard-frontend/   # React/TypeScript dashboard frontend
+e2e/                  # Playwright end-to-end tests
+```
 
-- Python: 4-space indentation, type hints for public APIs, and clear docstrings where behavior isn’t obvious.
-- Naming: `snake_case` for functions/variables, `PascalCase` for classes, `UPPER_SNAKE_CASE` for constants.
-- Prefer small, focused helpers over large “god” functions; this codebase is a library, so API clarity matters.
-- Keep diffs focused; avoid large, noisy reformat-only changes.
+---
+
+## Frontend Notes
+
+- Use shadcn/ui for frontend components.
+
+## Build, Test, and Lint Commands
+
+This project uses `uv` for dependency management.
+
+### Core Commands (use these)
+
+| Command | Description |
+|---------|-------------|
+| `make lint` | Run ruff check + ty type checker |
+| `make test` | Run pytest on `tests/` |
+| `make check` | Run lint + test |
+| `make build` | Build wheel/sdist (runs tests first) |
+| `make clean` | Remove caches and build artifacts |
+
+### Running a Single Test
+
+```bash
+# Run a specific test file
+uv run pytest tests/test_huldra_core.py -v
+
+# Run a specific test function
+uv run pytest tests/test_huldra_core.py::test_exists_reflects_success_state -v
+
+# Run tests matching a pattern
+uv run pytest -k "test_load" -v
+```
+
+### Dashboard Commands
+
+| Command | Description |
+|---------|-------------|
+| `make dashboard-dev` | Start dev servers (backend + frontend) |
+| `make dashboard-test` | Run dashboard backend tests |
+| `make dashboard-test-e2e` | Run Playwright e2e tests |
+| `make dashboard-test-all` | Run all dashboard tests |
+
+### Frontend Commands
+
+| Command | Description |
+|---------|-------------|
+| `make frontend-lint` | Run frontend TypeScript type checker |
+| `make frontend-test` | Run frontend unit tests |
+| `make frontend-build` | Build frontend for production |
+| `make frontend-generate` | Generate OpenAPI spec and TypeScript client |
+
+---
+
+## Code Style
+
+### Imports
+
+Order imports as: stdlib, third-party, local. Use absolute imports for cross-module references.
+
+```python
+import contextlib
+from pathlib import Path
+import chz
+from ..config import HULDRA_CONFIG
+```
+
+### Type Annotations
+
+- **Required** on all public APIs (functions, methods, class attributes)
+- Use modern syntax: `X | None` not `Optional[X]`
+- Use concrete types, not `Any`
+- Use generics where reasonable: `class Huldra[T](ABC):`
+
+```python
+# Good - specific types
+def process(data: dict[str, str]) -> list[int] | None:
+    ...
+
+# Good - use Pydantic models or dataclasses for structured data
+class UserConfig(BaseModel):
+    name: str
+    settings: dict[str, str]
+
+def load_config(path: Path) -> UserConfig:
+    ...
+
+# Bad - DO NOT USE
+def process(data: Dict[str, Any]) -> Optional[List[int]]:
+    ...
+
+# Bad - DO NOT USE untyped dicts
+def load_config(path: Path) -> dict[str, Any]:  # NO - use a model
+    ...
+```
+
+### Naming Conventions
+
+- `snake_case` for functions, variables, module names
+- `PascalCase` for classes
+- `UPPER_SNAKE_CASE` for constants
+- Private/internal names prefixed with `_` (e.g., `_HuldraState`, `_iso_now`)
+
+### Error Handling
+
+**Prefer happy path with early errors over defensive checks.** Don't wrap code in if-statements to handle error cases - let it crash or raise explicitly.
+
+```python
+# Good - assume happy path, crash if invariant violated
+data = json.loads(path.read_text())
+
+# Good - explicit early error instead of nested ifs
+if not condition:
+    raise ValueError("condition must be true")
+# proceed with happy path...
+
+# Bad - defensive if-checks for non-happy paths
+if path.exists():
+    data = json.loads(path.read_text())
+else:
+    data = {}  # NO - hides bugs, use happy path
+
+# Bad - swallowing errors
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    data = {}  # NO - this hides bugs
+```
+
+**Only use try/except for:**
+1. Resource cleanup (use `contextlib.suppress` for ignoring cleanup errors)
+2. Converting exceptions to domain-specific errors
+3. Explicit user-facing error messages
+
+### Formatting
+
+- 4-space indentation
+- Line length: follow ruff defaults
+- Use trailing commas in multi-line structures
+- Prefer small, focused functions over large ones
+
+---
 
 ## Testing Guidelines
 
-- Use `pytest` and `tests/test_*.py`.
-- Keep tests deterministic and avoid writing to the project root; use temp dirs (e.g., `tmp_path`) and env overrides.
+- All tests in `tests/` directory using pytest
+- Use `tmp_path` fixture for temporary directories
+- Use `huldra_tmp_root` fixture (from `conftest.py`) for isolated Huldra config
+- Keep tests deterministic - no writing to project root
+- Test functions named `test_<description>`
 
-## Commit & Pull Request Guidelines
+```python
+def test_exists_reflects_success_state(huldra_tmp_root) -> None:
+    obj = Dummy()
+    assert obj.exists() is False
+    obj.load_or_create()
+    assert obj.exists() is True
+```
 
-- Commits use short, imperative subjects (often lowercase), e.g. `fix typing`, `add raw data path to huldra config`.
-- Keep commits scoped; separate refactors from behavior changes where practical.
-- PRs should include: a clear summary, rationale, and notes on breaking changes or new config/env vars.
+### Test Coverage Requirements
 
-## Security & Configuration Tips
+**ALWAYS write extensive tests when adding new features.** Tests should cover:
 
-- Local configuration is loaded from `.env` (ignored by git). Don’t commit secrets.
-- Huldra storage defaults to `./data-huldra/`; override with `HULDRA_PATH`. Other knobs are `HULDRA_*` env vars.
-- Logging uses stdlib `logging` and routes logs to the active holder’s artifact directory during `load_or_create()`; call `huldra.configure_logging()` to install the handler eagerly if desired.
+1. **Happy path** - The feature works as expected with valid inputs
+2. **Edge cases** - Empty inputs, boundary values, None/null values
+3. **Filter combinations** - When adding filters, test each filter individually AND in combination
+4. **Error cases** - Invalid inputs, missing data, malformed requests
+5. **Integration** - Test the full stack (API endpoints, not just internal functions)
+
+For dashboard features specifically:
+- Add tests in `tests/dashboard/test_scanner.py` for scanner/filtering logic
+- Add tests in `tests/dashboard/test_api.py` for API endpoint behavior
+- Update `dashboard-frontend/src/api.test.ts` for frontend schema validation
+
+Example test structure for a new filter:
+```python
+def test_filter_by_new_field(huldra_tmp_root) -> None:
+    """Test filtering by the new field."""
+    # Setup: create experiments with different field values
+    # Test: filter returns only matching experiments
+    # Verify: correct count and correct experiments returned
+
+def test_filter_by_new_field_no_match(huldra_tmp_root) -> None:
+    """Test filter returns empty when no experiments match."""
+
+def test_filter_by_new_field_combined(huldra_tmp_root) -> None:
+    """Test new filter works in combination with existing filters."""
+```
+
+### Dashboard Test Performance
+
+**Use module-scoped fixtures for read-only tests.** Creating experiments is slow, so:
+
+1. **Prefer `populated_huldra_root`** (module-scoped) over `temp_huldra_root` (function-scoped)
+2. **Extend `_create_populated_experiments()`** in `conftest.py` when you need new test data
+3. **Only use `temp_huldra_root`** when tests must mutate state or need isolated data
+
+```python
+# Good - uses shared fixture, fast
+def test_filter_by_backend(client: TestClient, populated_huldra_root: Path) -> None:
+    response = client.get("/api/experiments?backend=local")
+    assert response.json()["total"] == 3  # Uses pre-created data
+
+# Slow - creates experiments per test (avoid unless necessary)
+def test_something(client: TestClient, temp_huldra_root: Path) -> None:
+    create_experiment_from_huldra(...)  # Slow!
+```
+
+---
+
+## Commit Guidelines
+
+- Short, imperative subjects (often lowercase)
+- Examples: `fix typing`, `add raw data path to huldra config`
+- Keep commits scoped; separate refactors from behavior changes
+
+---
+
+## Environment & Configuration
+
+- Local config from `.env` (gitignored); don't commit secrets
+- Storage defaults to `./data-huldra/`; override with `HULDRA_PATH`
+- Python version: >=3.12

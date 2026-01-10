@@ -48,10 +48,11 @@ class InvalidValidate(huldra.Huldra[int]):
         raise RuntimeError("validate error")
 
 
-def test_exists_returns_false_if_validate_throws(huldra_tmp_root) -> None:
+def test_exists_raises_if_validate_throws(huldra_tmp_root) -> None:
     obj = InvalidValidate()
     obj.load_or_create()
-    assert obj.exists() is False
+    with pytest.raises(RuntimeError, match="validate error"):
+        obj.exists()
 
 
 class ValidateReturnsFalse(huldra.Huldra[int]):
