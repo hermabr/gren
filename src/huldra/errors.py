@@ -26,6 +26,12 @@ class HuldraWaitTimeout(HuldraError):
     pass
 
 
+class HuldraLockNotAcquired(HuldraError):
+    """Raised when a compute lock cannot be acquired (someone else holds it)."""
+
+    pass
+
+
 class HuldraComputeError(HuldraError):
     """Raised when computation fails."""
 

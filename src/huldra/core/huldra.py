@@ -5,7 +5,6 @@ import os
 import signal
 import socket
 import sys
-import threading
 import time
 import traceback
 from abc import ABC, abstractmethod
@@ -20,7 +19,12 @@ from typing_extensions import dataclass_transform
 from ..adapters import SubmititAdapter
 from ..adapters.submitit import SubmititJob
 from ..config import HULDRA_CONFIG
-from ..errors import MISSING, HuldraComputeError, HuldraWaitTimeout
+from ..errors import (
+    MISSING,
+    HuldraComputeError,
+    HuldraLockNotAcquired,
+    HuldraWaitTimeout,
+)
 from ..runtime import current_holder
 from ..runtime.logging import enter_holder, get_logger, log, write_separator
 from ..runtime.tracebacks import format_traceback
@@ -32,10 +36,10 @@ from ..storage.state import (
     _StateAttemptFailed,
     _StateAttemptQueued,
     _StateAttemptRunning,
-    _StateAttemptTerminal,
     _StateResultAbsent,
     _StateResultFailed,
     _StateResultSuccess,
+    compute_lock,
 )
 
 
@@ -525,49 +529,14 @@ class Huldra[T](ABC):
             directory = self.huldra_dir
             directory.mkdir(parents=True, exist_ok=True)
 
-            lock_path = StateManager.get_lock_path(directory, StateManager.COMPUTE_LOCK)
-            lock_fd = None
-            next_wait_log_at = 0.0
-            while lock_fd is None:
-                lock_fd = StateManager.try_lock(lock_path)
-                if lock_fd is not None:
-                    break
-
-                self._reconcile(directory)
-                state = StateManager.read_state(directory)
-                attempt = state.attempt
-                if isinstance(state.result, _StateResultSuccess):
-                    return
-
-                if isinstance(state.result, _StateResultFailed) or isinstance(
-                    attempt, (_StateAttemptFailed, _StateAttemptTerminal)
-                ):
-                    return
-
-                now = time.time()
-                if now >= next_wait_log_at:
-                    logger.info(
-                        "compute: waiting for compute lock %s %s %s",
-                        self.__class__.__name__,
-                        self._huldra_hash,
-                        directory,
-                    )
-                    next_wait_log_at = now + HULDRA_CONFIG.wait_log_every_sec
-                time.sleep(HULDRA_CONFIG.poll_interval)
+            env_info = self._collect_submitit_env()
 
             try:
-                env_info = self._collect_submitit_env()
-
-                # Refresh metadata
-                metadata = MetadataManager.create_metadata(
-                    self, directory, ignore_diff=HULDRA_CONFIG.ignore_git_diff
-                )
-                MetadataManager.write_metadata(metadata, directory)
-
-                attempt_id = StateManager.start_attempt_running(
+                with compute_lock(
                     directory,
                     backend="submitit",
                     lease_duration_sec=HULDRA_CONFIG.lease_duration_sec,
+                    heartbeat_interval_sec=HULDRA_CONFIG.heartbeat_interval_sec,
                     owner={
                         "pid": os.getpid(),
                         "host": socket.gethostname(),
@@ -578,70 +547,77 @@ class Huldra[T](ABC):
                         "backend": env_info.get("backend"),
                         "job_id": env_info.get("slurm_job_id"),
                     },
-                )
+                    max_wait_time_sec=None,  # Workers wait indefinitely
+                    poll_interval_sec=HULDRA_CONFIG.poll_interval,
+                    wait_log_every_sec=HULDRA_CONFIG.wait_log_every_sec,
+                    reconcile_fn=lambda d: self._reconcile(d),
+                ) as ctx:
+                    # Refresh metadata (now safe - attempt is already recorded)
+                    metadata = MetadataManager.create_metadata(
+                        self, directory, ignore_diff=HULDRA_CONFIG.ignore_git_diff
+                    )
+                    MetadataManager.write_metadata(metadata, directory)
 
-                # Start heartbeat
-                stop_heartbeat = self._start_heartbeat(directory, attempt_id=attempt_id)
-
-                # Set up signal handlers
-                self._setup_signal_handlers(
-                    directory, stop_heartbeat, attempt_id=attempt_id
-                )
-
-                try:
-                    # Run computation
-                    logger.debug(
-                        "_create: begin %s %s %s",
-                        self.__class__.__name__,
-                        self._huldra_hash,
-                        directory,
-                    )
-                    self._create()
-                    logger.debug(
-                        "_create: ok %s %s %s",
-                        self.__class__.__name__,
-                        self._huldra_hash,
-                        directory,
-                    )
-                    StateManager.write_success_marker(directory, attempt_id=attempt_id)
-                    StateManager.finish_attempt_success(
-                        directory, attempt_id=attempt_id
-                    )
-                    logger.info(
-                        "_create ok %s %s",
-                        self.__class__.__name__,
-                        self._huldra_hash,
-                        extra={"huldra_console_only": True},
-                    )
-                except Exception as e:
-                    logger.error(
-                        "_create failed %s %s %s",
-                        self.__class__.__name__,
-                        self._huldra_hash,
-                        directory,
-                        extra={"huldra_file_only": True},
-                    )
-                    logger.error(
-                        "%s", format_traceback(e), extra={"huldra_file_only": True}
+                    # Set up signal handlers
+                    self._setup_signal_handlers(
+                        directory, ctx.stop_heartbeat, attempt_id=ctx.attempt_id
                     )
 
-                    tb = "".join(
-                        traceback.format_exception(type(e), e, e.__traceback__)
-                    )
-                    StateManager.finish_attempt_failed(
-                        directory,
-                        attempt_id=attempt_id,
-                        error={
-                            "type": type(e).__name__,
-                            "message": str(e),
-                            "traceback": tb,
-                        },
-                    )
-                    raise
-                finally:
-                    stop_heartbeat()
-            finally:
-                StateManager.release_lock(lock_fd, lock_path)
+                    try:
+                        # Run computation
+                        logger.debug(
+                            "_create: begin %s %s %s",
+                            self.__class__.__name__,
+                            self._huldra_hash,
+                            directory,
+                        )
+                        self._create()
+                        logger.debug(
+                            "_create: ok %s %s %s",
+                            self.__class__.__name__,
+                            self._huldra_hash,
+                            directory,
+                        )
+                        StateManager.write_success_marker(
+                            directory, attempt_id=ctx.attempt_id
+                        )
+                        StateManager.finish_attempt_success(
+                            directory, attempt_id=ctx.attempt_id
+                        )
+                        logger.info(
+                            "_create ok %s %s",
+                            self.__class__.__name__,
+                            self._huldra_hash,
+                            extra={"huldra_console_only": True},
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "_create failed %s %s %s",
+                            self.__class__.__name__,
+                            self._huldra_hash,
+                            directory,
+                            extra={"huldra_file_only": True},
+                        )
+                        logger.error(
+                            "%s", format_traceback(e), extra={"huldra_file_only": True}
+                        )
+
+                        tb = "".join(
+                            traceback.format_exception(type(e), e, e.__traceback__)
+                        )
+                        StateManager.finish_attempt_failed(
+                            directory,
+                            attempt_id=ctx.attempt_id,
+                            error={
+                                "type": type(e).__name__,
+                                "message": str(e),
+                                "traceback": tb,
+                            },
+                        )
+                        raise
+            except HuldraLockNotAcquired:
+                # Experiment already completed (success or failed), nothing to do
+                return
 
     def _collect_submitit_env(self: Self) -> _SubmititEnvInfo:
         """Collect submitit/slurm environment information."""
@@ -671,62 +647,19 @@ class Huldra[T](ABC):
         """Run computation locally, returning (status, created_here, result)."""
         logger = get_logger()
         directory = self.huldra_dir
-        lock_path = StateManager.get_lock_path(directory, StateManager.COMPUTE_LOCK)
 
-        lock_fd = None
-        next_wait_log_at = 0.0
-        while lock_fd is None:
-            lock_fd = StateManager.try_lock(lock_path)
-            if lock_fd is not None:
-                break
-
-            # Someone else is computing, wait for them
-            while True:
-                self._check_timeout(start_time)
-                self._reconcile(directory)
-                state = StateManager.read_state(directory)
-                attempt = state.attempt
-
-                if isinstance(state.result, _StateResultSuccess):
-                    return "success", False, None
-                if isinstance(state.result, _StateResultFailed):
-                    return "failed", False, None
-
-                if isinstance(attempt, _StateAttemptTerminal):
-                    break
-
-                now = time.time()
-                if now >= next_wait_log_at:
-                    logger.info(
-                        "compute: waiting for compute lock %s %s %s",
-                        self.__class__.__name__,
-                        self._huldra_hash,
-                        directory,
-                    )
-                    next_wait_log_at = now + HULDRA_CONFIG.wait_log_every_sec
-                time.sleep(HULDRA_CONFIG.poll_interval)
-
-            # Dependency attempt is no longer running; retry lock acquisition.
-            lock_fd = None
+        # Calculate remaining time for the lock wait
+        max_wait: float | None = None
+        if self._max_wait_time_sec is not None:
+            elapsed = time.time() - start_time
+            max_wait = max(0.0, self._max_wait_time_sec - elapsed)
 
         try:
-            # Create metadata
-            try:
-                metadata = MetadataManager.create_metadata(
-                    self, directory, ignore_diff=HULDRA_CONFIG.ignore_git_diff
-                )
-                MetadataManager.write_metadata(metadata, directory)
-            except Exception as e:
-                raise HuldraComputeError(
-                    "Failed to create metadata",
-                    StateManager.get_state_path(directory),
-                    e,
-                ) from e
-
-            attempt_id = StateManager.start_attempt_running(
+            with compute_lock(
                 directory,
                 backend="local",
                 lease_duration_sec=HULDRA_CONFIG.lease_duration_sec,
+                heartbeat_interval_sec=HULDRA_CONFIG.heartbeat_interval_sec,
                 owner={
                     "pid": os.getpid(),
                     "host": socket.gethostname(),
@@ -734,86 +667,92 @@ class Huldra[T](ABC):
                     "command": " ".join(sys.argv) if sys.argv else "<unknown>",
                 },
                 scheduler={},
-            )
+                max_wait_time_sec=max_wait,
+                poll_interval_sec=HULDRA_CONFIG.poll_interval,
+                wait_log_every_sec=HULDRA_CONFIG.wait_log_every_sec,
+                reconcile_fn=lambda d: self._reconcile(d),
+            ) as ctx:
+                # Create metadata (now safe - attempt is already recorded)
+                try:
+                    metadata = MetadataManager.create_metadata(
+                        self, directory, ignore_diff=HULDRA_CONFIG.ignore_git_diff
+                    )
+                    MetadataManager.write_metadata(metadata, directory)
+                except Exception as e:
+                    raise HuldraComputeError(
+                        "Failed to create metadata",
+                        StateManager.get_state_path(directory),
+                        e,
+                    ) from e
 
-            # Start heartbeat
-            stop_heartbeat = self._start_heartbeat(directory, attempt_id=attempt_id)
-
-            # Set up preemption handler
-            self._setup_signal_handlers(
-                directory, stop_heartbeat, attempt_id=attempt_id
-            )
-
-            try:
-                # Run the computation
-                logger.debug(
-                    "_create: begin %s %s %s",
-                    self.__class__.__name__,
-                    self._huldra_hash,
-                    directory,
-                )
-                result = self._create()
-                logger.debug(
-                    "_create: ok %s %s %s",
-                    self.__class__.__name__,
-                    self._huldra_hash,
-                    directory,
-                )
-                StateManager.write_success_marker(directory, attempt_id=attempt_id)
-                StateManager.finish_attempt_success(directory, attempt_id=attempt_id)
-                logger.info(
-                    "_create ok %s %s",
-                    self.__class__.__name__,
-                    self._huldra_hash,
-                    extra={"huldra_console_only": True},
-                )
-                return "success", True, result
-            except Exception as e:
-                logger.error(
-                    "_create failed %s %s %s",
-                    self.__class__.__name__,
-                    self._huldra_hash,
-                    directory,
-                    extra={"huldra_file_only": True},
-                )
-                logger.error(
-                    "%s", format_traceback(e), extra={"huldra_file_only": True}
+                # Set up preemption handler
+                self._setup_signal_handlers(
+                    directory, ctx.stop_heartbeat, attempt_id=ctx.attempt_id
                 )
 
-                # Record failure (plain text in file)
-                tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-                StateManager.finish_attempt_failed(
-                    directory,
-                    attempt_id=attempt_id,
-                    error={
-                        "type": type(e).__name__,
-                        "message": str(e),
-                        "traceback": tb,
-                    },
-                )
-                raise
-            finally:
-                stop_heartbeat()
-        finally:
-            StateManager.release_lock(lock_fd, lock_path)
+                try:
+                    # Run the computation
+                    logger.debug(
+                        "_create: begin %s %s %s",
+                        self.__class__.__name__,
+                        self._huldra_hash,
+                        directory,
+                    )
+                    result = self._create()
+                    logger.debug(
+                        "_create: ok %s %s %s",
+                        self.__class__.__name__,
+                        self._huldra_hash,
+                        directory,
+                    )
+                    StateManager.write_success_marker(
+                        directory, attempt_id=ctx.attempt_id
+                    )
+                    StateManager.finish_attempt_success(
+                        directory, attempt_id=ctx.attempt_id
+                    )
+                    logger.info(
+                        "_create ok %s %s",
+                        self.__class__.__name__,
+                        self._huldra_hash,
+                        extra={"huldra_console_only": True},
+                    )
+                    return "success", True, result
+                except Exception as e:
+                    logger.error(
+                        "_create failed %s %s %s",
+                        self.__class__.__name__,
+                        self._huldra_hash,
+                        directory,
+                        extra={"huldra_file_only": True},
+                    )
+                    logger.error(
+                        "%s", format_traceback(e), extra={"huldra_file_only": True}
+                    )
 
-    def _start_heartbeat(
-        self: Self, directory: Path, *, attempt_id: str
-    ) -> Callable[[], None]:
-        """Start heartbeat thread, return stop function."""
-        stop_event = threading.Event()
-
-        def heartbeat():
-            while not stop_event.wait(HULDRA_CONFIG.heartbeat_interval_sec):
-                StateManager.heartbeat(
-                    directory,
-                    attempt_id=attempt_id,
-                    lease_duration_sec=HULDRA_CONFIG.lease_duration_sec,
-                )
-
-        thread = threading.Thread(target=heartbeat, daemon=True)
-        thread.start()
-        return stop_event.set
+                    # Record failure (plain text in file)
+                    tb = "".join(
+                        traceback.format_exception(type(e), e, e.__traceback__)
+                    )
+                    StateManager.finish_attempt_failed(
+                        directory,
+                        attempt_id=ctx.attempt_id,
+                        error={
+                            "type": type(e).__name__,
+                            "message": str(e),
+                            "traceback": tb,
+                        },
+                    )
+                    raise
+        except HuldraLockNotAcquired:
+            # Lock couldn't be acquired because experiment already completed
+            state = StateManager.read_state(directory)
+            if isinstance(state.result, _StateResultSuccess):
+                return "success", False, None
+            if isinstance(state.result, _StateResultFailed):
+                return "failed", False, None
+            # Shouldn't happen, but re-raise if state is unexpected
+            raise
 
     def _reconcile(
         self: Self, directory: Path, *, adapter: SubmititAdapter | None = None

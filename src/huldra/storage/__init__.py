@@ -5,13 +5,16 @@ from .metadata import (
     MetadataManager,
 )
 from .state import (
+    ComputeLockContext,
     HuldraErrorState,
     StateAttempt,
     StateManager,
     StateOwner,
+    compute_lock,
 )
 
 __all__ = [
+    "ComputeLockContext",
     "EnvironmentInfo",
     "GitInfo",
     "HuldraErrorState",
@@ -20,4 +23,5 @@ __all__ = [
     "StateAttempt",
     "StateManager",
     "StateOwner",
+    "compute_lock",
 ]

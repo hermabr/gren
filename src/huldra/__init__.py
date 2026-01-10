@@ -10,7 +10,13 @@ import submitit
 from .config import HULDRA_CONFIG, HuldraConfig, get_huldra_root, set_huldra_root
 from .adapters import SubmititAdapter
 from .core import Huldra, HuldraList
-from .errors import HuldraComputeError, HuldraError, HuldraWaitTimeout, MISSING
+from .errors import (
+    HuldraComputeError,
+    HuldraError,
+    HuldraLockNotAcquired,
+    HuldraWaitTimeout,
+    MISSING,
+)
 from .runtime import (
     configure_logging,
     current_holder,
@@ -31,6 +37,7 @@ __all__ = [
     "HuldraConfig",
     "HuldraError",
     "HuldraList",
+    "HuldraLockNotAcquired",
     "HuldraSerializer",
     "HuldraWaitTimeout",
     "MISSING",
