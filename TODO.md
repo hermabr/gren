@@ -6,6 +6,8 @@
 
 ## Code Quality
 
+- [ ] Make speed benchmarks and make operations faster, such as very large objects for hashing
+
 ## Storage & Data Management
 
 - [ ] Garbage collection - Have the option to delete old, failed, or orphaned artifacts
@@ -32,6 +34,11 @@
 ### Experiment Management
 
 - [ ] Migration helper / show stale runs that are no longer valid
+    - [ ] Support migrations in the backend
+    - [ ] Migrate all to the new default value
+    - [ ] Migrate all to a value you set
+    - [ ] Migrate only one experiment
+    - [ ] Migrate based on a filter
 - [ ] Create new experiments with different hyperparameters from the UI and get code snippet
 - [ ] Support parameter sweeps
 - [ ] Rerun experiments from UI or via code snippet
@@ -61,6 +68,7 @@
 ### UI/UX
 
 - [x] Use shadcn
+- [ ] Use polars filtering for selecting experiments (there probably exists something better than polars)
 - [ ] Support making graphs/charts given a result file such as a json or parquet file (decide: Python vs React)
 - [ ] Explore: discover all available runs/experiments in code (or via JSON manifest for reproducibility dashboard)
 - [ ] Show all output files of an experiment
@@ -70,6 +78,9 @@
 - [ ] Live log streaming - Tail logs in real-time
 - [ ] Keyboard shortcuts - Navigation with VIM (j/k, /, etc.)
 - [ ] General UI improvements
+- [ ] Named experiments (either with _name in huldra or rename in the web ui and update the metadata)
+- [ ] Tags for experiments. Each experiment can have multiple tags
+- [ ] Nice UI/UX for selecting experiments (maybe using either something from SQL or some sort of code for selecting?)
 
 ### API (Missing Endpoints)
 
