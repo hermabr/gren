@@ -2,12 +2,18 @@ import datetime as _dt
 import json
 import os
 import socket
+import threading
 import time
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from ..errors import HuldraLockNotAcquired, HuldraWaitTimeout
 
 
 # Type alias for scheduler-specific metadata. Different schedulers (SLURM, LSF, PBS, local)
@@ -940,3 +946,156 @@ class StateManager:
         }:
             cls.get_lock_path(directory, cls.COMPUTE_LOCK).unlink(missing_ok=True)
         return state
+
+
+@dataclass
+class ComputeLockContext:
+    """Context returned when a compute lock is successfully acquired."""
+
+    attempt_id: str
+    stop_heartbeat: Callable[[], None]
+
+
+@contextmanager
+def compute_lock(
+    directory: Path,
+    *,
+    backend: str,
+    lease_duration_sec: float,
+    heartbeat_interval_sec: float,
+    owner: _OwnerDict,
+    scheduler: SchedulerMetadata | None = None,
+    max_wait_time_sec: float | None = None,
+    poll_interval_sec: float = 10.0,
+    wait_log_every_sec: float = 10.0,
+    reconcile_fn: Callable[[Path], None] | None = None,
+) -> Generator[ComputeLockContext, None, None]:
+    """
+    Context manager that atomically acquires lock + records attempt + starts heartbeat.
+
+    This ensures there can never be a mismatch between the lock file and state:
+    - Lock acquisition and attempt recording happen together
+    - Heartbeat starts immediately after attempt is recorded
+    - On exit, heartbeat is stopped and lock is released
+
+    The context manager handles the wait loop internally, blocking until the lock
+    is acquired or timeout is reached.
+
+    Args:
+        directory: The huldra directory for this experiment
+        backend: Backend type (e.g., "local", "submitit")
+        lease_duration_sec: Duration of the lease in seconds
+        heartbeat_interval_sec: Interval between heartbeats in seconds
+        owner: Owner information (pid, host, user, etc.)
+        scheduler: Optional scheduler metadata
+        max_wait_time_sec: Maximum time to wait for lock (None = wait forever)
+        poll_interval_sec: Interval between lock acquisition attempts
+        wait_log_every_sec: Interval between "waiting for lock" log messages
+        reconcile_fn: Optional function to call to reconcile stale attempts
+
+    Yields:
+        ComputeLockContext with attempt_id and stop_heartbeat callable
+
+    Raises:
+        HuldraLockNotAcquired: If lock cannot be acquired (after waiting)
+        HuldraWaitTimeout: If max_wait_time_sec is exceeded
+    """
+    lock_path = StateManager.get_lock_path(directory, StateManager.COMPUTE_LOCK)
+
+    lock_fd: int | None = None
+    start_time = time.time()
+    next_wait_log_at = 0.0
+
+    # Import here to avoid circular import
+    from ..runtime import get_logger
+
+    logger = get_logger()
+
+    # Wait loop to acquire lock
+    while lock_fd is None:
+        # Check timeout
+        if max_wait_time_sec is not None:
+            elapsed = time.time() - start_time
+            if elapsed > max_wait_time_sec:
+                raise HuldraWaitTimeout(
+                    f"Timed out waiting for compute lock after {elapsed:.1f}s"
+                )
+
+        lock_fd = StateManager.try_lock(lock_path)
+        if lock_fd is not None:
+            break
+
+        # Lock held by someone else - reconcile and check state
+        if reconcile_fn is not None:
+            reconcile_fn(directory)
+
+        state = StateManager.read_state(directory)
+        attempt = state.attempt
+
+        # If result is terminal, no point waiting
+        if isinstance(state.result, _StateResultSuccess):
+            raise HuldraLockNotAcquired(
+                "Cannot acquire lock: experiment already succeeded"
+            )
+        if isinstance(state.result, _StateResultFailed):
+            raise HuldraLockNotAcquired(
+                "Cannot acquire lock: experiment already failed"
+            )
+
+        # If no active attempt but lock exists, it's orphaned - clean it up
+        if attempt is None or isinstance(
+            attempt,
+            (
+                _StateAttemptSuccess,
+                _StateAttemptFailed,
+                _StateAttemptTerminal,
+            ),
+        ):
+            # Orphaned lock file - remove it and retry immediately
+            lock_path.unlink(missing_ok=True)
+            continue
+
+        # Active attempt exists - wait for it
+        now = time.time()
+        if now >= next_wait_log_at:
+            logger.info(
+                "compute_lock: waiting for lock %s",
+                directory,
+            )
+            next_wait_log_at = now + wait_log_every_sec
+        time.sleep(poll_interval_sec)
+
+    # Lock acquired - now atomically record attempt and start heartbeat
+    stop_event = threading.Event()
+    attempt_id: str | None = None
+
+    try:
+        # Record attempt IMMEDIATELY to minimize orphan window
+        attempt_id = StateManager.start_attempt_running(
+            directory,
+            backend=backend,
+            lease_duration_sec=lease_duration_sec,
+            owner=owner,
+            scheduler=scheduler,
+        )
+
+        # Start heartbeat IMMEDIATELY
+        def heartbeat() -> None:
+            while not stop_event.wait(heartbeat_interval_sec):
+                StateManager.heartbeat(
+                    directory,
+                    attempt_id=attempt_id,  # type: ignore[arg-type]
+                    lease_duration_sec=lease_duration_sec,
+                )
+
+        thread = threading.Thread(target=heartbeat, daemon=True)
+        thread.start()
+
+        yield ComputeLockContext(
+            attempt_id=attempt_id,
+            stop_heartbeat=stop_event.set,
+        )
+    finally:
+        # Always stop heartbeat and release lock
+        stop_event.set()
+        StateManager.release_lock(lock_fd, lock_path)
