@@ -58,7 +58,7 @@ frontend-generate:
 
 # Build
 frontend-build: frontend-generate
-	cd dashboard-frontend && bun run build
+	cd dashboard-frontend && bunx @tanstack/router-cli generate && bun run build
 
 # Testing
 dashboard-test:
