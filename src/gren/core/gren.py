@@ -289,9 +289,11 @@ class Gren[T](ABC):
                 start_time = time.time()
                 directory = self.gren_dir
                 directory.mkdir(parents=True, exist_ok=True)
-                adapter0 = SubmititAdapter(executor) if executor is not None else None
-                self._reconcile(directory, adapter=adapter0)
+
+                # Optimistic read: if state is already good, we don't need to reconcile (write lock)
                 state0 = StateManager.read_state(directory)
+                
+                needs_reconcile = True
                 if isinstance(state0.result, _StateResultSuccess):
                     if self._force_recompute():
                         self._invalidate_cached_success(
@@ -305,12 +307,21 @@ class Gren[T](ABC):
                                     directory, reason="_validate returned false"
                                 )
                                 state0 = StateManager.read_state(directory)
+                            else:
+                                # Valid success found, skip reconcile
+                                needs_reconcile = False
                         except Exception as e:
                             self._invalidate_cached_success(
                                 directory,
                                 reason=f"_validate raised {type(e).__name__}: {e}",
                             )
                             state0 = StateManager.read_state(directory)
+
+                if needs_reconcile and executor is not None:
+                    adapter0 = SubmititAdapter(executor)
+                    self._reconcile(directory, adapter=adapter0)
+                    state0 = StateManager.read_state(directory)
+
                 attempt0 = state0.attempt
                 if isinstance(state0.result, _StateResultSuccess):
                     decision = "success->load"
