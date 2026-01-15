@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.3
+## v0.2.0
 - Add `GREN_CACHE_METADATA` for time-based git info caching. Accepts `never`, `forever`, or duration like `5m`, `1h`. Default: `5m`.
 - Add `clear_metadata_cache()` to manually invalidate cached metadata.
 
