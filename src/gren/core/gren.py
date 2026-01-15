@@ -312,6 +312,7 @@ class Gren[T](ABC):
                                 # Valid success! Return immediately.
                                 # Since we didn't read state, we skip the logging below for speed
                                 # or we can log a minimal message if needed.
+                                self._log_console_start(action_color="green")
                                 return self._load()
                         except Exception as e:
                             self._invalidate_cached_success(
@@ -366,33 +367,8 @@ class Gren[T](ABC):
                 # Cache hits can be extremely noisy in pipelines; keep logs for state
                 # transitions (create/wait) and error cases, but suppress repeated
                 # "success->load" lines and the raw separator on successful loads.
-                caller_frame = inspect.currentframe()
-                caller_info: _CallerInfo = {}
-                if caller_frame is not None:
-                    # Walk up the stack to find the caller outside of gren package
-                    gren_pkg_dir = str(Path(__file__).parent.parent)
-                    frame = caller_frame.f_back
-                    while frame is not None:
-                        filename = frame.f_code.co_filename
-                        # Skip frames from within the gren package
-                        if not filename.startswith(gren_pkg_dir):
-                            caller_info = {
-                                "gren_caller_file": filename,
-                                "gren_caller_line": frame.f_lineno,
-                            }
-                            break
-                        frame = frame.f_back
+                self._log_console_start(action_color=action_color)
 
-                logger.info(
-                    "load_or_create %s %s",
-                    self.__class__.__name__,
-                    self._gren_hash,
-                    extra={
-                        "gren_console_only": True,
-                        "gren_action_color": action_color,
-                        **caller_info,
-                    },
-                )
                 if decision != "success->load":
                     write_separator()
                     logger.debug(
@@ -482,6 +458,37 @@ class Gren[T](ABC):
                     self._gren_hash,
                     "ok" if ok else "error",
                 )
+
+    def _log_console_start(self, action_color: str) -> None:
+        """Log the start of load_or_create to console with caller info."""
+        logger = get_logger()
+        caller_frame = inspect.currentframe()
+        caller_info: _CallerInfo = {}
+        if caller_frame is not None:
+            # Walk up the stack to find the caller outside of gren package
+            gren_pkg_dir = str(Path(__file__).parent.parent)
+            frame = caller_frame.f_back
+            while frame is not None:
+                filename = frame.f_code.co_filename
+                # Skip frames from within the gren package
+                if not filename.startswith(gren_pkg_dir):
+                    caller_info = {
+                        "gren_caller_file": filename,
+                        "gren_caller_line": frame.f_lineno,
+                    }
+                    break
+                frame = frame.f_back
+
+        logger.info(
+            "load_or_create %s %s",
+            self.__class__.__name__,
+            self._gren_hash,
+            extra={
+                "gren_console_only": True,
+                "gren_action_color": action_color,
+                **caller_info,
+            },
+        )
 
     def _check_timeout(self, start_time: float) -> None:
         """Check if operation has timed out."""
