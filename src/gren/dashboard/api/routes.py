@@ -53,6 +53,7 @@ async def list_experiments(
     config_filter: str | None = Query(
         None, description="Filter by config field (format: field.path=value)"
     ),
+    view: str = Query("resolved", description="View mode: resolved or original"),
     limit: int = Query(100, ge=1, le=1000, description="Maximum number of results"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
 ) -> ExperimentList:
@@ -69,6 +70,7 @@ async def list_experiments(
         updated_after=updated_after,
         updated_before=updated_before,
         config_filter=config_filter,
+        view=view,
     )
 
     # Apply pagination
@@ -83,10 +85,12 @@ async def list_experiments(
     response_model=ExperimentRelationships,
 )
 async def get_experiment_relationships_route(
-    namespace: str, gren_hash: str
+    namespace: str,
+    gren_hash: str,
+    view: str = Query("resolved", description="View mode: resolved or original"),
 ) -> ExperimentRelationships:
     """Get parent and child relationships for a specific experiment."""
-    relationships = get_experiment_relationships(namespace, gren_hash)
+    relationships = get_experiment_relationships(namespace, gren_hash, view=view)
     if relationships is None:
         raise HTTPException(status_code=404, detail="Experiment not found")
     return relationships
@@ -95,9 +99,13 @@ async def get_experiment_relationships_route(
 @router.get(
     "/experiments/{namespace:path}/{gren_hash}", response_model=ExperimentDetail
 )
-async def get_experiment(namespace: str, gren_hash: str) -> ExperimentDetail:
+async def get_experiment(
+    namespace: str,
+    gren_hash: str,
+    view: str = Query("resolved", description="View mode: resolved or original"),
+) -> ExperimentDetail:
     """Get detailed information about a specific experiment."""
-    experiment = get_experiment_detail(namespace, gren_hash)
+    experiment = get_experiment_detail(namespace, gren_hash, view=view)
     if experiment is None:
         raise HTTPException(status_code=404, detail="Experiment not found")
     return experiment

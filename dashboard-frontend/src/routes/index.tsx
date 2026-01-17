@@ -135,6 +135,7 @@ function HomePage() {
                 <TableHead className="pl-6">Class</TableHead>
                 <TableHead>Namespace</TableHead>
                 <TableHead>Result</TableHead>
+                <TableHead>Migration</TableHead>
                 <TableHead>Attempt</TableHead>
                 <TableHead>Updated</TableHead>
               </TableRow>
@@ -159,6 +160,15 @@ function HomePage() {
                   </TableCell>
                   <TableCell>
                     <StatusBadge status={exp.result_status} type="result" />
+                  </TableCell>
+                  <TableCell>
+                    {exp.migration_kind ? (
+                      <span className="text-xs rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-300">
+                        {exp.migration_kind}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
                   </TableCell>
                   <TableCell>
                     {exp.attempt_status ? (

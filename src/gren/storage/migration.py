@@ -28,6 +28,7 @@ class MigrationRecord(BaseModel):
     to_version: float
     to_root: RootKind
     migrated_at: str
+    overwritten_at: str | None = None
     origin: str | None = None
     note: str | None = None
 

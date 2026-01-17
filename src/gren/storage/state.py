@@ -9,7 +9,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Callable, Literal, TypedDict
+from typing import Annotated, Any, Callable, Literal, Mapping, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -78,7 +78,6 @@ class _StateResultFailed(_StateResultBase):
 
 class _StateResultMigrated(_StateResultBase):
     status: Literal["migrated"] = "migrated"
-    migrated_at: str
 
 
 _StateResult = Annotated[
@@ -108,10 +107,7 @@ def _coerce_result(current: _StateResult, **updates: str) -> _StateResult:
         case "failed":
             return _StateResultFailed(status="failed")
         case "migrated":
-            migrated_at = data.get("migrated_at")
-            if not isinstance(migrated_at, str) or not migrated_at:
-                raise ValueError("Migrated result requires migrated_at")
-            return _StateResultMigrated(status="migrated", migrated_at=migrated_at)
+            return _StateResultMigrated(status="migrated")
 
         case _:
             raise ValueError(f"Invalid result status: {status!r}")
@@ -477,7 +473,7 @@ class StateManager:
             cls.release_lock(fd, lock_path)
 
     @classmethod
-    def append_event(cls, directory: Path, event: dict[str, str | int]) -> None:
+    def append_event(cls, directory: Path, event: Mapping[str, str | int]) -> None:
         path = cls.get_events_path(directory)
         enriched = {
             "ts": cls._iso_now(),

@@ -53,9 +53,7 @@ def test_locks_are_exclusive(gren_tmp_root, tmp_path) -> None:
     assert lock_path.exists() is False
 
 
-def test_reconcile_marks_dead_local_attempt_as_crashed(
-    gren_tmp_root, tmp_path
-) -> None:
+def test_reconcile_marks_dead_local_attempt_as_crashed(gren_tmp_root, tmp_path) -> None:
     directory = tmp_path / "obj"
     directory.mkdir()
 
@@ -360,7 +358,7 @@ def test_compute_lock_is_exclusive(gren_tmp_root, tmp_path) -> None:
                 owner={"pid": 12345, "host": f"host-{worker_id}", "user": "test-user"},
                 max_wait_time_sec=5.0,
                 poll_interval_sec=0.01,
-                reconcile_fn=lambda d: gren.StateManager.reconcile(d),
+                reconcile_fn=lambda d: (gren.StateManager.reconcile(d), None)[1],
             ):
                 results.append(f"{worker_id}-acquired")
                 time.sleep(delay_before_release)
@@ -428,7 +426,7 @@ def test_compute_lock_waits_for_active_attempt(gren_tmp_root, tmp_path) -> None:
         owner={"pid": 12345, "host": "test-host", "user": "test-user"},
         max_wait_time_sec=5.0,
         poll_interval_sec=0.02,
-        reconcile_fn=lambda d: gren.StateManager.reconcile(d),
+        reconcile_fn=lambda d: (gren.StateManager.reconcile(d), None)[1],
     ) as ctx:
         elapsed = time.time() - start
         # Should have waited for the lock (at least 0.05s, probably ~0.1s)

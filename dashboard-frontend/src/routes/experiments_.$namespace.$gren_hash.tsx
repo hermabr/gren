@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   useGetExperimentApiExperimentsNamespaceGrenHashGet,
@@ -453,20 +453,34 @@ export const Route = createFileRoute("/experiments_/$namespace/$gren_hash")({
 
 function ExperimentDetailPage() {
   const { namespace, gren_hash } = Route.useParams();
+  const [viewMode, setViewMode] = useState("resolved");
   const {
     data: experiment,
     isLoading,
     error,
   } = useGetExperimentApiExperimentsNamespaceGrenHashGet(
     namespace,
-    gren_hash
+    gren_hash,
+    { view: viewMode }
   );
 
   const { data: relationships } =
     useGetExperimentRelationshipsRouteApiExperimentsNamespaceGrenHashRelationshipsGet(
       namespace,
-      gren_hash
+      gren_hash,
+      { view: viewMode }
     );
+
+  const isMigrated = Boolean(experiment?.migration_kind);
+  const originalLink = useMemo(() => {
+    if (!experiment?.original_namespace || !experiment?.original_hash) {
+      return null;
+    }
+    return {
+      namespace: experiment.original_namespace,
+      gren_hash: experiment.original_hash,
+    };
+  }, [experiment?.original_namespace, experiment?.original_hash]);
 
   if (isLoading) {
     return (
@@ -529,15 +543,67 @@ function ExperimentDetailPage() {
                 {experiment.namespace}
               </p>
             </div>
-            <div className="flex gap-2">
-              <StatusBadge status={experiment.result_status} type="result" />
-              {experiment.attempt_status ? (
-                <StatusBadge status={experiment.attempt_status} type="attempt" />
+            <div className="flex flex-col items-end gap-2">
+              <div className="flex gap-2">
+                <StatusBadge status={experiment.result_status} type="result" />
+                {experiment.attempt_status ? (
+                  <StatusBadge status={experiment.attempt_status} type="attempt" />
+                ) : null}
+              </div>
+              {isMigrated ? (
+                <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">
+                  {experiment.migration_kind}
+                </span>
               ) : null}
             </div>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          {isMigrated && (
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <div className="rounded-full border border-muted px-3 py-1 text-muted-foreground">
+                View: {viewMode}
+              </div>
+              <div className="flex rounded-full border border-muted overflow-hidden">
+                <button
+                  className={`px-3 py-1 text-xs ${
+                    viewMode === "resolved"
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground"
+                  }`}
+                  onClick={() => setViewMode("resolved")}
+                >
+                  Aliased
+                </button>
+                <button
+                  className={`px-3 py-1 text-xs ${
+                    viewMode === "original"
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground"
+                  }`}
+                  onClick={() => setViewMode("original")}
+                  disabled={!originalLink}
+                >
+                  Original
+                </button>
+              </div>
+              {originalLink ? (
+                <Button asChild size="sm" variant="ghost">
+                  <Link
+                    to="/experiments/$namespace/$gren_hash"
+                    params={originalLink}
+                  >
+                    View original
+                  </Link>
+                </Button>
+              ) : null}
+              {experiment.original_result_status ? (
+                <span className="text-muted-foreground">
+                  Original status: {experiment.original_result_status}
+                </span>
+              ) : null}
+            </div>
+          )}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
             <div>
               <span className="text-muted-foreground block">Hash</span>

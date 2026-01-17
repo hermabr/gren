@@ -57,7 +57,7 @@ def test_exists_reflects_success_state(gren_tmp_root) -> None:
 
 def test_load_or_create_recovers_from_expired_running_lease(gren_tmp_root) -> None:
     obj = Dummy()
-    directory = obj.gren_dir
+    directory = obj._base_gren_dir()
     directory.mkdir(parents=True, exist_ok=True)
 
     expired = (
@@ -108,7 +108,7 @@ def test_load_or_create_waits_until_lease_expires_then_recovers(
     gren_tmp_root,
 ) -> None:
     obj = Dummy()
-    directory = obj.gren_dir
+    directory = obj._base_gren_dir()
     directory.mkdir(parents=True, exist_ok=True)
 
     # Simulate another process holding the compute lock, but with a lease that will expire.

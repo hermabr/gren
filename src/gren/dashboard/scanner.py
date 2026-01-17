@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import cast
 
 from ..config import GREN_CONFIG
-from ..storage import MetadataManager, StateAttempt
+from ..storage import MetadataManager, MigrationManager, MigrationRecord, StateAttempt
 from ..storage.state import StateManager, _GrenState
 from .api.models import (
     ChildExperiment,
@@ -55,7 +55,11 @@ def _get_class_name(namespace: str) -> str:
 
 
 def _state_to_summary(
-    state: _GrenState, namespace: str, gren_hash: str
+    state: _GrenState,
+    namespace: str,
+    gren_hash: str,
+    migration: MigrationRecord | None = None,
+    original_status: str | None = None,
 ) -> ExperimentSummary:
     """Convert a Gren state to an experiment summary."""
     attempt = state.attempt
@@ -72,6 +76,17 @@ def _state_to_summary(
         backend=attempt.backend if attempt else None,
         hostname=attempt.owner.hostname if attempt else None,
         user=attempt.owner.user if attempt else None,
+        migration_kind=migration.kind if migration else None,
+        migration_policy=migration.policy if migration else None,
+        migrated_at=migration.migrated_at if migration else None,
+        overwritten_at=migration.overwritten_at if migration else None,
+        migration_origin=migration.origin if migration else None,
+        migration_note=migration.note if migration else None,
+        from_namespace=migration.from_namespace if migration else None,
+        from_hash=migration.from_hash if migration else None,
+        to_namespace=migration.to_namespace if migration else None,
+        to_hash=migration.to_hash if migration else None,
+        original_result_status=original_status,
     )
 
 
@@ -81,6 +96,10 @@ def _state_to_detail(
     gren_hash: str,
     directory: Path,
     metadata: JsonDict | None,
+    migration: MigrationRecord | None = None,
+    original_status: str | None = None,
+    original_namespace: str | None = None,
+    original_hash: str | None = None,
 ) -> ExperimentDetail:
     """Convert a Gren state to a detailed experiment record."""
     attempt = state.attempt
@@ -99,6 +118,19 @@ def _state_to_detail(
         state=state.model_dump(mode="json"),
         metadata=metadata,
         attempt=attempt_detail,
+        migration_kind=migration.kind if migration else None,
+        migration_policy=migration.policy if migration else None,
+        migrated_at=migration.migrated_at if migration else None,
+        overwritten_at=migration.overwritten_at if migration else None,
+        migration_origin=migration.origin if migration else None,
+        migration_note=migration.note if migration else None,
+        from_namespace=migration.from_namespace if migration else None,
+        from_hash=migration.from_hash if migration else None,
+        to_namespace=migration.to_namespace if migration else None,
+        to_hash=migration.to_hash if migration else None,
+        original_result_status=original_status,
+        original_namespace=original_namespace,
+        original_hash=original_hash,
     )
 
 
@@ -159,6 +191,7 @@ def scan_experiments(
     updated_after: str | None = None,
     updated_before: str | None = None,
     config_filter: str | None = None,
+    view: str = "resolved",
 ) -> list[ExperimentSummary]:
     """
     Scan the filesystem for Gren experiments.
@@ -175,6 +208,7 @@ def scan_experiments(
         updated_after: Filter experiments updated after this ISO datetime
         updated_before: Filter experiments updated before this ISO datetime
         config_filter: Filter by config field in format "field.path=value"
+        view: "resolved" uses alias metadata; "original" uses original metadata/state.
 
     Returns:
         List of experiment summaries, sorted by updated_at (newest first)
@@ -197,8 +231,34 @@ def scan_experiments(
         for experiment_dir in _find_experiment_dirs(root):
             state = StateManager.read_state(experiment_dir)
             namespace, gren_hash = _parse_namespace_from_path(experiment_dir, root)
+            migration = MigrationManager.read_migration(experiment_dir)
+            original_status: str | None = None
 
-            summary = _state_to_summary(state, namespace, gren_hash)
+            if migration is not None and migration.kind == "alias":
+                original_dir = MigrationManager.resolve_dir(migration, target="from")
+                original_state = StateManager.read_state(original_dir)
+                original_status = original_state.result.status
+                if view == "original":
+                    state = original_state
+                    namespace = migration.from_namespace
+                    gren_hash = migration.from_hash
+                elif view == "resolved":
+                    state = original_state
+
+            summary = _state_to_summary(
+                state,
+                namespace,
+                gren_hash,
+                migration=migration,
+                original_status=original_status,
+            )
+
+            if (
+                migration is not None
+                and migration.kind == "alias"
+                and view == "resolved"
+            ):
+                continue
 
             # Apply filters
             if result_status and summary.result_status != result_status:
@@ -239,7 +299,13 @@ def scan_experiments(
 
             # Config field filter - requires reading metadata
             if config_field and config_value is not None:
-                metadata = MetadataManager.read_metadata_raw(experiment_dir)
+                metadata_dir = experiment_dir
+                if migration is not None and migration.kind == "alias":
+                    if view in {"original", "resolved"}:
+                        metadata_dir = MigrationManager.resolve_dir(
+                            migration, target="from"
+                        )
+                metadata = MetadataManager.read_metadata_raw(metadata_dir)
                 if metadata:
                     gren_obj = metadata.get("gren_obj")
                     if isinstance(gren_obj, dict):
@@ -262,13 +328,19 @@ def scan_experiments(
     return experiments
 
 
-def get_experiment_detail(namespace: str, gren_hash: str) -> ExperimentDetail | None:
+def get_experiment_detail(
+    namespace: str,
+    gren_hash: str,
+    *,
+    view: str = "resolved",
+) -> ExperimentDetail | None:
     """
     Get detailed information about a specific experiment.
 
     Args:
         namespace: Dot-separated namespace (e.g., "my_project.pipelines.TrainModel")
         gren_hash: Hash identifying the specific experiment
+        view: "resolved" uses alias metadata; "original" uses original metadata/state.
 
     Returns:
         Experiment detail or None if not found
@@ -283,8 +355,34 @@ def get_experiment_detail(namespace: str, gren_hash: str) -> ExperimentDetail | 
         if state_path.is_file():
             state = StateManager.read_state(experiment_dir)
             metadata = MetadataManager.read_metadata_raw(experiment_dir)
+            migration = MigrationManager.read_migration(experiment_dir)
+            original_status: str | None = None
+            original_namespace: str | None = None
+            original_hash: str | None = None
+
+            if migration is not None and migration.kind == "alias":
+                original_dir = MigrationManager.resolve_dir(migration, target="from")
+                original_state = StateManager.read_state(original_dir)
+                original_status = original_state.result.status
+                original_namespace = migration.from_namespace
+                original_hash = migration.from_hash
+                if view == "original":
+                    state = original_state
+                    metadata = MetadataManager.read_metadata_raw(original_dir)
+                    experiment_dir = original_dir
+                    namespace = original_namespace
+                    gren_hash = original_hash
+
             return _state_to_detail(
-                state, namespace, gren_hash, experiment_dir, metadata
+                state,
+                namespace,
+                gren_hash,
+                experiment_dir,
+                metadata,
+                migration=migration,
+                original_status=original_status,
+                original_namespace=original_namespace,
+                original_hash=original_hash,
             )
 
     return None
@@ -413,6 +511,13 @@ def get_experiment_dag() -> ExperimentDAG:
             if not metadata:
                 continue
 
+            migration = MigrationManager.read_migration(experiment_dir)
+            if migration is not None and migration.kind == "alias":
+                original_dir = MigrationManager.resolve_dir(migration, target="from")
+                metadata = MetadataManager.read_metadata_raw(original_dir)
+                if not metadata:
+                    continue
+
             gren_obj = metadata.get("gren_obj")
             if not isinstance(gren_obj, dict):
                 continue
@@ -525,11 +630,16 @@ def _find_experiment_by_gren_obj(
             if not metadata:
                 continue
 
+            migration = MigrationManager.read_migration(experiment_dir)
+            if migration is not None and migration.kind == "alias":
+                original_dir = MigrationManager.resolve_dir(migration, target="from")
+                metadata = MetadataManager.read_metadata_raw(original_dir)
+                if not metadata:
+                    continue
+
             stored_gren_obj = metadata.get("gren_obj")
             if stored_gren_obj == gren_obj:
-                namespace, gren_hash = _parse_namespace_from_path(
-                    experiment_dir, root
-                )
+                namespace, gren_hash = _parse_namespace_from_path(experiment_dir, root)
                 state = StateManager.read_state(experiment_dir)
                 return namespace, gren_hash, state.result.status
 
@@ -537,7 +647,10 @@ def _find_experiment_by_gren_obj(
 
 
 def get_experiment_relationships(
-    namespace: str, gren_hash: str
+    namespace: str,
+    gren_hash: str,
+    *,
+    view: str = "resolved",
 ) -> ExperimentRelationships | None:
     """
     Get parent and child relationships for an experiment.
@@ -559,6 +672,13 @@ def get_experiment_relationships(
         state_path = StateManager.get_state_path(experiment_dir)
 
         if state_path.is_file():
+            migration = MigrationManager.read_migration(experiment_dir)
+            if (
+                view == "original"
+                and migration is not None
+                and migration.kind == "alias"
+            ):
+                experiment_dir = MigrationManager.resolve_dir(migration, target="from")
             target_metadata = MetadataManager.read_metadata_raw(experiment_dir)
             break
 

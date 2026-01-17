@@ -41,9 +41,9 @@ def test_list_experiments(client: TestClient, populated_gren_root: Path) -> None
     response = client.get("/api/experiments")
     assert response.status_code == 200
     data = response.json()
-    # 6 experiments: dataset1, dataset2, train1, train2, eval1, loader
-    assert data["total"] == 6
-    assert len(data["experiments"]) == 6
+    # 7 experiments: dataset1, dataset2, train1, train2, eval1, loader, alias
+    assert data["total"] == 7
+    assert len(data["experiments"]) == 7
 
     # Check structure of returned experiments
     exp = data["experiments"][0]
@@ -51,6 +51,11 @@ def test_list_experiments(client: TestClient, populated_gren_root: Path) -> None
     assert "gren_hash" in exp
     assert "class_name" in exp
     assert "result_status" in exp
+
+    response_original = client.get("/api/experiments?view=original")
+    assert response_original.status_code == 200
+    original_data = response_original.json()
+    assert original_data["total"] == 7
 
 
 def test_list_experiments_filter_by_result_status(
@@ -64,6 +69,12 @@ def test_list_experiments_filter_by_result_status(
     assert data["total"] == 3
     for exp in data["experiments"]:
         assert exp["result_status"] == "success"
+
+    migrated = client.get("/api/experiments?result_status=migrated")
+    assert migrated.status_code == 200
+    migrated_data = migrated.json()
+    assert migrated_data["total"] == 1
+    assert migrated_data["experiments"][0]["migration_kind"] == "alias"
 
 
 def test_list_experiments_filter_by_attempt_status(
@@ -84,10 +95,17 @@ def test_list_experiments_filter_by_namespace(
     response = client.get("/api/experiments?namespace=dashboard.pipelines")
     assert response.status_code == 200
     data = response.json()
-    # All 6 experiments are in dashboard.pipelines
-    assert data["total"] == 6
+    # All 7 experiments are in dashboard.pipelines
+    assert data["total"] == 7
     for exp in data["experiments"]:
         assert exp["namespace"].startswith("dashboard.pipelines")
+
+    original_view = client.get(
+        "/api/experiments?namespace=dashboard.pipelines&view=original"
+    )
+    assert original_view.status_code == 200
+    data = original_view.json()
+    assert data["total"] == 7
 
 
 def test_list_experiments_filter_by_class(
@@ -110,13 +128,13 @@ def test_list_experiments_pagination(
     response = client.get("/api/experiments?limit=2&offset=0")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 6
+    assert data["total"] == 7
     assert len(data["experiments"]) == 2
 
     response = client.get("/api/experiments?limit=2&offset=2")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 6
+    assert data["total"] == 7
     assert len(data["experiments"]) == 2
 
 
@@ -141,6 +159,16 @@ def test_get_experiment_detail(client: TestClient, populated_gren_root: Path) ->
     assert "state" in data
     assert "metadata" in data
 
+    alias = PrepareDataset(name="mnist", version="v2")
+    alias_hash = GrenSerializer.compute_hash(alias)
+    alias_response = client.get(
+        f"/api/experiments/dashboard.pipelines.PrepareDataset/{alias_hash}?view=resolved"
+    )
+    assert alias_response.status_code == 200
+    alias_data = alias_response.json()
+    assert alias_data["migration_kind"] == "alias"
+    assert alias_data["original_result_status"] == "success"
+
 
 def test_get_experiment_detail_with_attempt(
     client: TestClient, populated_gren_root: Path
@@ -161,6 +189,11 @@ def test_get_experiment_detail_with_attempt(
     assert data["attempt"] is not None
     assert data["attempt"]["status"] == "running"
     assert data["attempt"]["owner"]["host"] == "gpu-02"
+
+    response_original = client.get(
+        f"/api/experiments/dashboard.pipelines.TrainModel/{gren_hash}?view=original"
+    )
+    assert response_original.status_code == 200
 
 
 def test_get_experiment_not_found(
@@ -190,9 +223,9 @@ def test_dashboard_stats(client: TestClient, populated_gren_root: Path) -> None:
     assert response.status_code == 200
     data = response.json()
 
-    # 6 total: dataset1(success), train1(success), train2(running),
-    #          eval1(failed), loader(success), dataset2(absent)
-    assert data["total"] == 6
+    # 7 total: dataset1(success), train1(success), train2(running),
+    #          eval1(failed), loader(success), dataset2(absent), alias(migrated)
+    assert data["total"] == 7
     assert data["success_count"] == 3
     assert data["failed_count"] == 1
     assert data["running_count"] == 1
@@ -203,6 +236,7 @@ def test_dashboard_stats(client: TestClient, populated_gren_root: Path) -> None:
     assert result_statuses.get("failed", 0) == 1
     assert result_statuses.get("incomplete", 0) == 1
     assert result_statuses.get("absent", 0) == 1
+    assert result_statuses.get("migrated", 0) == 1
 
 
 def test_combined_filters(client: TestClient, populated_gren_root: Path) -> None:

@@ -23,7 +23,6 @@ from ..errors import (
     MISSING,
     GrenComputeError,
     GrenLockNotAcquired,
-    GrenMigrationRequired,
     GrenWaitTimeout,
 )
 from ..runtime import current_holder
@@ -41,6 +40,7 @@ from ..storage import (
 )
 from ..storage.state import (
     _GrenState,
+    _OwnerDict,
     _StateAttemptFailed,
     _StateAttemptQueued,
     _StateAttemptRunning,
@@ -212,13 +212,16 @@ class Gren[T](ABC):
         qualname = f"{self.__class__.__module__}.{self.__class__.__qualname__}"
         return qualname in GREN_CONFIG.force_recompute
 
+    def _base_gren_dir(self: Self) -> Path:
+        root = GREN_CONFIG.get_root(self.version_controlled)
+        return root / self.__class__._namespace() / self._gren_hash
+
     @property
     def gren_dir(self: Self) -> Path:
         """Get the directory for this Gren object."""
-        root = GREN_CONFIG.get_root(self.version_controlled)
-        directory = root / self.__class__._namespace() / self._gren_hash
-        migration = MigrationManager.read_migration(directory)
-        if migration is not None and migration.kind == "alias":
+        directory = self._base_gren_dir()
+        migration = self._alias_record(directory)
+        if migration is not None and self._alias_is_active(directory, migration):
             return MigrationManager.resolve_dir(migration, target="from")
         return directory
 
@@ -251,15 +254,8 @@ class Gren[T](ABC):
     def exists(self: Self) -> bool:
         """Check if result exists and is valid."""
         logger = get_logger()
-        directory = self.gren_dir
+        directory = self._base_gren_dir()
         state = StateManager.read_state(directory)
-
-        if isinstance(state.result, _StateResultMigrated):
-            target = self._migration_target_dir(directory)
-            if target is None:
-                logger.info("exists %s -> false", directory)
-                return False
-            state = StateManager.read_state(target)
 
         if not isinstance(state.result, _StateResultSuccess):
             logger.info("exists %s -> false", directory)
@@ -271,7 +267,7 @@ class Gren[T](ABC):
 
     def get_metadata(self: Self) -> "GrenMetadata":
         """Get metadata for this object."""
-        directory = self.gren_dir
+        directory = self._base_gren_dir()
         return MetadataManager.read_metadata(directory)
 
     @overload
@@ -304,21 +300,47 @@ class Gren[T](ABC):
                 "dep: begin %s %s %s",
                 self.__class__.__name__,
                 self._gren_hash,
-                self.gren_dir,
+                self._base_gren_dir(),
             )
 
         ok = False
         try:
             with enter_holder(self):
                 start_time = time.time()
-                directory = self.gren_dir
-                directory.mkdir(parents=True, exist_ok=True)
+                base_dir = self._base_gren_dir()
+                base_dir.mkdir(parents=True, exist_ok=True)
+                directory = base_dir
+                migration = self._alias_record(base_dir)
+                alias_active = False
 
-                if self._is_migrated_state(directory) and not self._force_recompute():
-                    raise GrenMigrationRequired(
-                        f"{self.__class__.__name__} is migrated; run gren.migrate()",
-                        state_path=StateManager.get_state_path(directory),
-                    )
+                if (
+                    migration is not None
+                    and migration.kind == "alias"
+                    and migration.overwritten_at is None
+                ):
+                    target_dir = MigrationManager.resolve_dir(migration, target="from")
+                    target_state = StateManager.read_state(target_dir)
+                    if isinstance(target_state.result, _StateResultSuccess):
+                        alias_active = True
+                        directory = target_dir
+                    else:
+                        self._maybe_detach_alias(
+                            directory=base_dir,
+                            record=migration,
+                            reason="original_not_success",
+                        )
+                        migration = MigrationManager.read_migration(base_dir)
+
+                if alias_active and self._force_recompute():
+                    if migration is not None:
+                        self._maybe_detach_alias(
+                            directory=base_dir,
+                            record=migration,
+                            reason="force_recompute",
+                        )
+                    migration = MigrationManager.read_migration(base_dir)
+                    alias_active = False
+                    directory = base_dir
 
                 # Optimistic read: if state is already good, we don't need to reconcile (write lock)
                 # Optimization: Check for success marker first to avoid reading state.json
@@ -467,7 +489,7 @@ class Gren[T](ABC):
                     )
 
                 # Asynchronous execution with submitit
-                (submitit_folder := self.gren_dir / "submitit").mkdir(
+                (submitit_folder := self._base_gren_dir() / "submitit").mkdir(
                     exist_ok=True, parents=True
                 )
                 executor.folder = submitit_folder
@@ -529,19 +551,60 @@ class Gren[T](ABC):
                 )
 
     def _is_migrated_state(self, directory: Path) -> bool:
-        state = StateManager.read_state(directory)
-        return isinstance(state.result, _StateResultMigrated)
+        record = self._alias_record(directory)
+        return record is not None and self._alias_is_active(directory, record)
 
     def _migration_target_dir(self, directory: Path) -> Path | None:
-        record = MigrationManager.read_migration(directory)
-        if record is None:
-            return None
-        if record.kind != "alias":
+        record = self._alias_record(directory)
+        if record is None or record.kind != "alias":
             return None
         return MigrationManager.resolve_dir(record, target="from")
 
     def _resolve_effective_dir(self) -> Path:
-        return self.gren_dir
+        return self._base_gren_dir()
+
+    def _alias_record(self, directory: Path) -> MigrationRecord | None:
+        record = MigrationManager.read_migration(directory)
+        if record is None or record.kind != "alias":
+            return None
+        return record
+
+    def _alias_is_active(self, directory: Path, record: MigrationRecord) -> bool:
+        if record.overwritten_at is not None:
+            return False
+        state = StateManager.read_state(directory)
+        if not isinstance(state.result, _StateResultMigrated):
+            return False
+        target = MigrationManager.resolve_dir(record, target="from")
+        target_state = StateManager.read_state(target)
+        return isinstance(target_state.result, _StateResultSuccess)
+
+    def _maybe_detach_alias(
+        self: Self,
+        *,
+        directory: Path,
+        record: MigrationRecord,
+        reason: str,
+    ) -> None:
+        if record.overwritten_at is not None:
+            return
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        record.overwritten_at = now
+        MigrationManager.write_migration(record, directory)
+        target = MigrationManager.resolve_dir(record, target="from")
+        target_record = MigrationManager.read_migration(target)
+        if target_record is not None:
+            target_record.overwritten_at = now
+            MigrationManager.write_migration(target_record, target)
+        event: dict[str, str | int] = {
+            "type": "migration_overwrite",
+            "policy": record.policy,
+            "from": f"{record.from_namespace}:{record.from_hash}",
+            "to": f"{record.to_namespace}:{record.to_hash}",
+            "reason": reason,
+        }
+        StateManager.append_event(directory, event.copy())
+        StateManager.append_event(target, event.copy())
 
     def _submit_once(
         self,
@@ -597,14 +660,25 @@ class Gren[T](ABC):
                 executable=env_info.executable,
                 platform=env_info.platform,
             )
-            owner_payload = owner_state.model_dump()
+            owner_payload: _OwnerDict = {
+                "pid": owner_state.pid,
+                "host": owner_state.host,
+                "hostname": owner_state.hostname,
+                "user": owner_state.user,
+                "command": owner_state.command,
+                "timestamp": owner_state.timestamp,
+                "python_version": owner_state.python_version,
+                "executable": owner_state.executable,
+                "platform": owner_state.platform,
+            }
             attempt_id = StateManager.start_attempt_queued(
                 directory,
                 backend="submitit",
                 lease_duration_sec=GREN_CONFIG.lease_duration_sec,
-                owner=owner_payload,  # type: ignore[arg-type]
+                owner=owner_payload,
                 scheduler={},
             )
+
             job = adapter.submit(lambda: self._worker_entry())
 
             # Save job handle and watch for job ID
@@ -645,7 +719,7 @@ class Gren[T](ABC):
         """Entry point for worker process (called by submitit or locally)."""
         with enter_holder(self):
             logger = get_logger()
-            directory = self.gren_dir
+            directory = self._base_gren_dir()
             directory.mkdir(parents=True, exist_ok=True)
 
             env_info = self._collect_submitit_env()
@@ -765,7 +839,7 @@ class Gren[T](ABC):
     def _run_locally(self: Self, start_time: float) -> tuple[str, bool, T | None]:
         """Run computation locally, returning (status, created_here, result)."""
         logger = get_logger()
-        directory = self.gren_dir
+        directory = self._base_gren_dir()
 
         # Calculate remaining time for the lock wait
         max_wait: float | None = None

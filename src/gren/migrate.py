@@ -36,7 +36,6 @@ def migrate(
 
     to_dir.mkdir(parents=True, exist_ok=True)
 
-    from_state = StateManager.read_state(from_dir)
     from_root = _root_kind(from_obj)
     to_root = _root_kind(to_obj)
     now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
@@ -56,6 +55,7 @@ def migrate(
         to_version=float(to_obj.gren_version),
         to_root=to_root,
         migrated_at=now,
+        overwritten_at=None,
         origin=origin,
         note=note,
     )
@@ -64,7 +64,7 @@ def migrate(
         _transfer_payload(from_dir, to_dir, policy)
         _copy_state(from_dir, to_dir)
     else:
-        _write_migrated_state(to_dir, now)
+        _write_migrated_state(to_dir)
 
     metadata = MetadataManager.create_metadata(to_obj, to_dir, ignore_diff=True)
     MetadataManager.write_metadata(metadata, to_dir)
@@ -93,6 +93,7 @@ def migrate(
             to_version=float(to_obj.gren_version),
             to_root=to_root,
             migrated_at=now,
+            overwritten_at=None,
             origin=origin,
             note=note,
         )
@@ -158,12 +159,9 @@ def _copy_state(from_dir: Path, to_dir: Path) -> None:
         shutil.copy2(success_marker, StateManager.get_success_marker_path(to_dir))
 
 
-def _write_migrated_state(directory: Path, migrated_at: str) -> None:
+def _write_migrated_state(directory: Path) -> None:
     def mutate(state) -> None:
-        state.result = _StateResultMigrated(
-            status="migrated",
-            migrated_at=migrated_at,
-        )
+        state.result = _StateResultMigrated(status="migrated")
         state.attempt = None
 
     StateManager.update_state(directory, mutate)

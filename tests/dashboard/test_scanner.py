@@ -26,8 +26,8 @@ def test_scan_experiments_empty(temp_gren_root: Path) -> None:
 def test_scan_experiments_finds_all(populated_gren_root: Path) -> None:
     """Test that scanner finds all experiments."""
     experiments = scan_experiments()
-    # 6 experiments: dataset1, dataset2, train1, train2, eval1, loader
-    assert len(experiments) == 6
+    # 7 experiments: dataset1, dataset2, train1, train2, eval1, loader, alias
+    assert len(experiments) == 7
 
 
 def test_scan_experiments_filter_result_status(populated_gren_root: Path) -> None:
@@ -38,6 +38,10 @@ def test_scan_experiments_filter_result_status(populated_gren_root: Path) -> Non
     for exp in experiments:
         assert exp.result_status == "success"
 
+    migrated = scan_experiments(result_status="migrated")
+    assert len(migrated) == 1
+    assert migrated[0].migration_kind == "alias"
+
 
 def test_scan_experiments_filter_attempt_status(populated_gren_root: Path) -> None:
     """Test filtering by attempt status."""
@@ -45,14 +49,20 @@ def test_scan_experiments_filter_attempt_status(populated_gren_root: Path) -> No
     assert len(experiments) == 1
     assert experiments[0].attempt_status == "failed"
 
+    resolved = scan_experiments(attempt_status="failed", view="resolved")
+    assert len(resolved) == 1
+
 
 def test_scan_experiments_filter_namespace(populated_gren_root: Path) -> None:
     """Test filtering by namespace prefix."""
     experiments = scan_experiments(namespace_prefix="dashboard.pipelines")
-    # All 6 experiments are in dashboard.pipelines
-    assert len(experiments) == 6
+    # All 7 experiments are in dashboard.pipelines
+    assert len(experiments) == 7
     for exp in experiments:
         assert exp.namespace.startswith("dashboard.pipelines")
+
+    original = scan_experiments(namespace_prefix="dashboard.pipelines", view="original")
+    assert len(original) == 7
 
 
 def test_scan_experiments_sorted_by_updated_at(temp_gren_root: Path) -> None:
@@ -99,6 +109,21 @@ def test_get_experiment_detail_found(populated_gren_root: Path) -> None:
     assert detail.metadata is not None
     assert "state" in detail.model_dump()
 
+    alias = PrepareDataset(name="mnist", version="v2")
+    alias_hash = GrenSerializer.compute_hash(alias)
+    alias_detail = get_experiment_detail(
+        "dashboard.pipelines.PrepareDataset", alias_hash, view="resolved"
+    )
+    assert alias_detail is not None
+    assert alias_detail.migration_kind == "alias"
+    assert alias_detail.original_result_status == "success"
+
+    alias_original = get_experiment_detail(
+        "dashboard.pipelines.PrepareDataset", alias_hash, view="original"
+    )
+    assert alias_original is not None
+    assert alias_original.gren_hash == gren_hash
+
 
 def test_get_experiment_detail_not_found(populated_gren_root: Path) -> None:
     """Test getting detail for a non-existent experiment."""
@@ -130,9 +155,9 @@ def test_get_stats_empty(temp_gren_root: Path) -> None:
 def test_get_stats_counts(populated_gren_root: Path) -> None:
     """Test that stats correctly count experiments."""
     stats = get_stats()
-    # 6 total: dataset1(success), train1(success), train2(running),
-    #          eval1(failed), loader(success), dataset2(absent)
-    assert stats.total == 6
+    # 7 total: dataset1(success), train1(success), train2(running),
+    #          eval1(failed), loader(success), dataset2(absent), alias(migrated)
+    assert stats.total == 7
     assert stats.success_count == 3
     assert stats.failed_count == 1
     assert stats.running_count == 1
@@ -143,6 +168,7 @@ def test_get_stats_counts(populated_gren_root: Path) -> None:
     assert result_map["failed"] == 1
     assert result_map["incomplete"] == 1
     assert result_map["absent"] == 1
+    assert result_map["migrated"] == 1
 
 
 def test_scan_experiments_version_controlled(temp_gren_root: Path) -> None:
@@ -188,7 +214,7 @@ def test_scan_experiments_filter_by_class(populated_gren_root: Path) -> None:
 def test_scan_experiments_filter_by_backend(populated_gren_root: Path) -> None:
     """Test filtering experiments by backend."""
     # Fixture has: dataset1(local), train1(local), train2(submitit),
-    #              eval1(local), loader(submitit), dataset2(no attempt)
+    #              eval1(local), loader(submitit), dataset2(no attempt), alias(no attempt)
 
     # Filter by local backend
     local_results = scan_experiments(backend="local")
@@ -220,7 +246,7 @@ def test_scan_experiments_filter_by_backend_no_match(temp_gren_root: Path) -> No
 def test_scan_experiments_filter_by_hostname(populated_gren_root: Path) -> None:
     """Test filtering experiments by hostname."""
     # Fixture has: dataset1(gpu-01), train1(gpu-01), train2(gpu-02),
-    #              eval1(gpu-02), loader(gpu-01), dataset2(no attempt)
+    #              eval1(gpu-02), loader(gpu-01), dataset2(no attempt), alias(no attempt)
 
     # Filter by gpu-01
     gpu01_results = scan_experiments(hostname="gpu-01")

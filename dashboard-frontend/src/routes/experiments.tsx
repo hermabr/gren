@@ -48,6 +48,7 @@ function ExperimentsPage() {
   const [startedAfter, setStartedAfter] = useState("");
   const [startedBefore, setStartedBefore] = useState("");
   const [configFilter, setConfigFilter] = useState("");
+  const [viewMode, setViewMode] = useState("resolved");
   const [page, setPage] = useState(0);
   const limit = 20;
 
@@ -61,6 +62,7 @@ function ExperimentsPage() {
     started_after: startedAfter || undefined,
     started_before: startedBefore || undefined,
     config_filter: configFilter || undefined,
+    view: viewMode,
     limit,
     offset: page * limit,
   });
@@ -102,14 +104,45 @@ function ExperimentsPage() {
 
       {/* Filters */}
       <Card className="mb-6">
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>Filters</CardTitle>
-          {hasFilters && (
-            <Button variant="ghost" size="sm" onClick={resetFilters}>
-              Clear filters
-            </Button>
-          )}
-        </CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <CardTitle>Filters</CardTitle>
+            <div className="flex items-center gap-2">
+              <div className="flex rounded-full border border-muted overflow-hidden text-xs">
+                <button
+                  className={`px-3 py-1 ${
+                    viewMode === "resolved"
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground"
+                  }`}
+                  onClick={() => {
+                    setViewMode("resolved");
+                    setPage(0);
+                  }}
+                >
+                  Aliased
+                </button>
+                <button
+                  className={`px-3 py-1 ${
+                    viewMode === "original"
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground"
+                  }`}
+                  onClick={() => {
+                    setViewMode("original");
+                    setPage(0);
+                  }}
+                >
+                  Original
+                </button>
+              </div>
+              {hasFilters && (
+                <Button variant="ghost" size="sm" onClick={resetFilters}>
+                  Clear filters
+                </Button>
+              )}
+            </div>
+          </CardHeader>
+
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {/* Namespace filter */}
@@ -311,7 +344,9 @@ function ExperimentsPage() {
                 <TableHead>Namespace</TableHead>
                 <TableHead>Hash</TableHead>
                 <TableHead>Result</TableHead>
+                <TableHead>Migration</TableHead>
                 <TableHead>Attempt</TableHead>
+
                 <TableHead>Backend</TableHead>
                 <TableHead>Host</TableHead>
                 <TableHead>User</TableHead>
@@ -343,6 +378,15 @@ function ExperimentsPage() {
                   </TableCell>
                   <TableCell>
                     <StatusBadge status={exp.result_status} type="result" />
+                  </TableCell>
+                  <TableCell>
+                    {exp.migration_kind ? (
+                      <span className="text-xs rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-300">
+                        {exp.migration_kind}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">-</span>
+                    )}
                   </TableCell>
                   <TableCell>
                     {exp.attempt_status ? (
