@@ -1,21 +1,61 @@
 Progress for Migration Feature
 
 Context
-- Goal: add explicit migration/alias support for Gren objects (rename/move/field changes), add gren_version default 1.0, block _create for migrated objects unless force recompute, log migrations/overwrites, and show migration state in dashboard.
+- Goal: add explicit migration/alias support for Gren objects (rename/move/field changes), add gren_version default 1.0, block implicit recompute for active aliases, log migrations/overwrites, and show migration state in dashboard.
+- Terminology:
+  - aliased object = new object created by migration (alias directory).
+  - original object = pre-migration object (existing directory).
 - Explicit migrations only: no implicit legacy lookup. Alias directories must be created via gren.migrate or dashboard-triggered migration.
-- Alias dir should have metadata + state.json with result.status="migrated". SUCCESS.json should NOT exist in alias dir.
-- migration.json should be written in both old and new dirs for alias/move; copy policy leaves old dir unchanged except for event log.
-- exists() should return True if alias target is success.
-- dashboard default view should show resolved (migrated) object with a tag; detail view should show original version if migrated; radio to switch view.
-- migrated_at should live in migration.json (not state.json). However state.json still uses result.status="migrated". We debated adding migrated_at to state.json but decision is to keep migrated_at in migration.json.
+- State format: alias dir has metadata.json + state.json with result.status="migrated" and no SUCCESS.json. migrated_at lives only in migration.json.
+- Migration record: migration.json exists in both dirs for alias/move; copy leaves original unchanged except for events. Record includes from/to namespace+hash+version+root, policy, origin, note, migrated_at.
+- New behavior: alias is only active while migration.json has overwritten_at == null and original is success. If original is not success, the alias is detached and runs its own _create.
 
-Key decisions from user
+Decisions (current)
 - Always alias by default; move/copy optional.
-- No implicit resolution; alias directory must be created with migration.json.
-- _create must not run for migrated objects unless force recompute.
-- Migrated objects should log migration and overwrites with timestamps in events.jsonl for both old and new dirs.
-- gren_version is the only version field (no separate current version field). Default 1.0 and stored in metadata always; omit from to_python if default.
-- Dashboard should show migrated tag in resolved view; original view should show original object unchanged (copy policy only adds event log).
+- gren_version is the only version field (no separate current version field). Default 1.0, always stored in metadata, omitted from to_python if default.
+- Explicit migrations only: no implicit resolution or legacy lookup.
+- _create must not run for active migrated aliases unless force recompute. If original is not success, alias recompute is allowed and detaches the alias.
+- Migration events should be logged in events.jsonl for both original and aliased dirs.
+- Overwrite logging uses a distinct event: migration_overwrite.
+- Dashboard is display-only for now (no migration endpoints yet), but should be ready for future auto/manual migrations.
+- Aliased object view: show aliased metadata/config, but also surface original status info if available and provide a button to view the original.
+
+Detailed implementation plan
+1) State model cleanup
+   - src/gren/storage/state.py: remove migrated_at from _StateResultMigrated and _coerce_result; state.json stores only result.status="migrated".
+   - src/gren/migrate.py: _write_migrated_state should only set result.status="migrated" and clear attempt.
+
+2) Migration record detachment
+   - src/gren/storage/migration.py: add overwritten_at: str | None = None to MigrationRecord.
+   - Update MigrationManager read/write accordingly.
+
+3) Alias activation + resolution logic
+   - src/gren/core/gren.py:
+     - Alias is active only when (state.result.status == "migrated") AND (migration.overwritten_at is None) AND (original result is success).
+     - gren_dir resolves to original only for active aliases; otherwise stays on alias dir.
+     - _is_migrated_state returns True only for active aliases so GrenMigrationRequired only blocks _create in that case.
+
+4) Alias detachment + overwrite logging
+   - In load_or_create, when force recompute is enabled or original is not success:
+     - Compute in alias dir.
+     - Mark overwritten_at in migration.json for both dirs.
+     - Append migration_overwrite event to events.jsonl in both dirs with payload: policy, from, to, reason.
+
+5) Dashboard API (resolved/original views)
+   - src/gren/dashboard/api/models.py: add migration fields (kind, policy, migrated_at, overwritten_at, origin, note, from/to identifiers, original_result_status).
+   - src/gren/dashboard/scanner.py: support view=resolved|original. Resolved view uses aliased metadata/config but includes original status if available.
+   - src/gren/dashboard/api/routes.py: add a view query param for list/detail endpoints.
+
+6) Frontend display
+   - After make frontend-generate, update list + detail views to show migrated tag and toggle resolved/original.
+   - Detail view should show aliased config by default, with a button to view original.
+   - Update dashboard-frontend/src/api.test.ts mock data for migration fields.
+
+7) Tests + verification
+   - Add tests for migration behavior (alias active vs detached, overwrite logging).
+   - Add dashboard tests for resolved/original view and migrated tags.
+   - Update CHANGELOG.md.
+   - Run make lint and make test (plus dashboard tests if modified).
 
 Completed work
 - [x] Added migration registry and helpers
@@ -54,24 +94,12 @@ Completed work
     - uses DEFAULT_GREN_VERSION for target version check.
 
 Current issues / blockers
-- [ ] src/gren/storage/state.py is unstable due to toggling migrated_at on _StateResultMigrated.
-  - Desired final: _StateResultMigrated should NOT include migrated_at in state.json.
-  - But _coerce_result currently expects migrated_at and returns _StateResultMigrated with migrated_at. This must be reverted.
-  - The state file should only store result.status="migrated". migrated_at should live only in migration.json.
-- [ ] LSP/typing noise in core/gren.py around start_attempt_queued owner payload. Ignore or fix by defining proper Owner dict.
-- [ ] In migrate.py, _write_migrated_state still sets migrated_at in state (should be removed once state model is fixed).
-- [ ] Additional migration logging for overwrite (force recompute) still needs to be added.
-
-Next steps
-- [ ] Fix state migration handling (remove migrated_at from state.json; update coerce_result and migrate.py).
-- [ ] Add overwrite logging in load_or_create when force recompute against migrated alias.
-- [ ] Add migration-aware dashboard API and frontend UI.
-- [ ] Add tests and update CHANGELOG.md.
-
-Notes about chz defaults
-- chz supports default comparison via Field._default and Field._default_factory.
-- Similar logic appears in chz.data_model.pretty_format and beta_to_blueprint_values(skip_defaults=True).
-- Use that logic to detect default gren_version in to_python.
+- [ ] src/gren/storage/state.py still expects migrated_at in _StateResultMigrated; this must be removed.
+- [ ] migrate.py _write_migrated_state still writes migrated_at; should only set status.
+- [ ] No overwritten_at in migration.json yet (needed for alias detachment tracking).
+- [ ] Alias activation logic does not yet check original success or overwritten_at.
+- [ ] No migration_overwrite logging yet.
+- [ ] Dashboard API/FE migration display still missing.
 
 Files modified/added so far
 - [x] Added: src/gren/serialization/migrations.py
@@ -84,14 +112,3 @@ Files modified/added so far
 - [x] Modified: src/gren/core/gren.py
 - [ ] Modified: src/gren/storage/state.py (needs cleanup)
 - [x] Modified: src/gren/__init__.py
-
-Original plan (agreed)
-- [ ] Migration schema + registry: MigrationContext, FieldRename, FieldAdd (default or default_factory), Transform, MigrationSpec, MigrationRegistry; support code-defined + external (dashboard/API) migrations and chain with warning when >1 hop.
-- [ ] gren_version: single field on Gren default 1.0; always stored in metadata; omit from to_python when default; adding it changes hashes and requires explicit migration.
-- [ ] Explicit alias-only resolution: no implicit legacy lookup; alias directory must be created with migration.json; gren_dir resolves alias targets when migration.json kind=alias.
-- [ ] Alias dirs + markers: alias dir contains metadata.json for new object and state.json with result.status="migrated"; no SUCCESS.json; migration.json written in both old/new for alias/move; copy leaves old unchanged except event log; migrated_at stored in migration.json only.
-- [ ] Migrate API: gren.migrate(from_obj, to_obj, policy=alias|move|copy, origin, note) never calls _create; move/copy move or copy non-.gren payload; always log events in both dirs with timestamps.
-- [ ] Force recompute rules: if current object is migrated, _create is blocked unless force recompute; on force recompute log overwritten events in both old/new dirs.
-- [ ] exists() returns true when alias target is success; alias state only is not success.
-- [ ] Dashboard: default resolved view with migrated tag; detail view shows original version if migrated; radio for resolved/original/both; allow simple migrations from dashboard.
-- [ ] Tests + changelog: add migration tests (alias/move/copy, default_factory, chain warning, exists/force recompute) and update CHANGELOG.md; run make lint/test (and dashboard-test if dashboard changes).
