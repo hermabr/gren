@@ -23,7 +23,7 @@ No interactive prompts are part of the core API. The workflow is:
 - Defaults are only applied explicitly (never implicitly).
 - Default conflicts always throw.
 - Cascading (dependent migrations) is enabled by default.
-- When target dir exists with success/running state, require force or skip with warning.
+- When target dir exists with success/running state, use conflict handling (throw/skip/overwrite).
 
 ## Types
 
@@ -100,7 +100,7 @@ def find_migration_candidates(
     *,
     namespace: str,
     to_obj: type[Gren],
-    default_values: Mapping[str, Primitive] | None = None,
+    default_values: Mapping[str, MigrationValue] | None = None,
     default_fields: Iterable[str] | None = None,
     drop_fields: Iterable[str] | None = None,
 ) -> list[MigrationCandidate]:
@@ -111,7 +111,7 @@ def find_migration_candidates(
     *,
     namespace: NamespacePair,
     to_obj: None = None,
-    default_values: Mapping[str, Primitive] | None = None,
+    default_values: Mapping[str, MigrationValue] | None = None,
     default_fields: Iterable[str] | None = None,
     drop_fields: Iterable[str] | None = None,
 ) -> list[MigrationCandidate]:
@@ -121,7 +121,7 @@ def find_migration_candidates(
     *,
     namespace: str | NamespacePair,
     to_obj: type[Gren] | None = None,
-    default_values: Mapping[str, Primitive] | None = None,
+    default_values: Mapping[str, MigrationValue] | None = None,
     default_fields: Iterable[str] | None = None,
     drop_fields: Iterable[str] | None = None,
 ) -> list[MigrationCandidate]:
@@ -136,7 +136,7 @@ Rules:
 - If `namespace` is `NamespacePair`, `to_obj` must be `None`.
 - If `namespace` is `str`, `to_obj` must be provided.
 - `to_obj` must be a class (uninitialized); passing an instance throws.
-- Defaults are applied only if the field appears in `default_fields`.
+- `default_values` always applies for its fields; `default_fields` controls which fields are filled from class defaults.
 - When defaults are used, they come from:
   - `to_obj` class defaults if `to_obj` provided
   - target class defaults if `NamespacePair` is used
@@ -167,7 +167,6 @@ Rules:
 Apply a single candidate.
 
 ```
-@overload
 @overload
 def apply_migration(
     candidate: MigrationCandidate,
@@ -256,6 +255,7 @@ When building candidates:
 ### Defaults / drops
 - `migration: default_values provided for existing fields: {fields}`
 - `migration: default_fields provided for existing fields: {fields}`
+- `migration: default_fields and default_values overlap: {fields}`
 - `migration: default_fields missing defaults for fields: {fields}`
 - `migration: default_values contains fields not in target schema: {fields}`
 - `migration: default_fields contains fields not in target schema: {fields}`
