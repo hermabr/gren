@@ -168,6 +168,7 @@ Apply a single candidate.
 
 ```
 @overload
+@overload
 def apply_migration(
     candidate: MigrationCandidate,
     *,
@@ -175,8 +176,7 @@ def apply_migration(
     cascade: bool = True,
     origin: str | None = None,
     note: str | None = None,
-    force_overwrite: bool = False,
-    on_conflict: Literal["throw"] = "throw",
+    conflict: Literal["throw", "overwrite"] = "throw",
 ) -> list[MigrationRecord]:
     ...
 
@@ -188,8 +188,7 @@ def apply_migration(
     cascade: bool = True,
     origin: str | None = None,
     note: str | None = None,
-    force_overwrite: bool = False,
-    on_conflict: Literal["skip"],
+    conflict: Literal["skip"],
 ) -> list[MigrationRecord | MigrationSkip]:
     ...
 
@@ -200,22 +199,26 @@ def apply_migration(
     cascade: bool = True,
     origin: str | None = None,
     note: str | None = None,
-    force_overwrite: bool = False,
-    on_conflict: Literal["throw", "skip"] = "throw",
+    conflict: Literal["throw", "skip", "overwrite"] = "throw",
 ) -> list[MigrationRecord | MigrationSkip]:
     ...
 ```
 
 Behavior:
 - `cascade=True` by default. If False, emit warning.
+- When `cascade=True`, build the full cascade list and validate all candidates (schema + type checks) before writing any migrations. If any candidate is invalid, raise and perform no writes.
+- Conflict checks happen during the preflight phase:
+  - `conflict="throw"` -> any conflicting candidate aborts the entire migration with no writes.
+  - `conflict="skip"` -> skip conflicting candidates and all of their dependent cascade entries, then validate the remaining candidates before writing.
+  - `conflict="overwrite"` -> allow conflicting candidates, overwrite target dirs, and log `migration_overwrite` events.
 - Target dir safety check:
   - Use `Gren.get_state()` (alias-aware) for the target dir.
   - If target state is `success` or `running`:
-    - `force_overwrite=False` and `on_conflict="throw"` -> error
-    - `force_overwrite=False` and `on_conflict="skip"` -> warn + skip
-    - `force_overwrite=True` -> proceed + log overwrite event
-- When `on_conflict="throw"`, return only `MigrationRecord` entries.
-- When `on_conflict="skip"`, return a mixed list containing `MigrationRecord` and `MigrationSkip` entries.
+    - `conflict="throw"` -> error
+    - `conflict="skip"` -> warn + skip
+    - `conflict="overwrite"` -> proceed + log overwrite event
+- When `conflict="throw"`, return only `MigrationRecord` entries.
+- When `conflict="skip"`, return a mixed list containing `MigrationRecord` and `MigrationSkip` entries.
 
 ## Validation Rules (Strict)
 
@@ -225,6 +228,7 @@ When building candidates:
 2) Drop fields from `drop_fields`.
    - If drop target missing -> error.
 3) Defaults:
+   - If the same field appears in both `default_fields` and `default_values` -> error.
    - If `default_fields` includes field already present -> error.
    - If `default_values` includes field already present -> error.
    - If field has no default in target class -> error.
@@ -262,7 +266,7 @@ When building candidates:
 - `migration: extra fields present; use drop_fields to remove: {fields}`
 
 ### Apply conflict
-- `migration: target exists with status {status}; pass force_overwrite=True or on_conflict='skip'`
+- `migration: target exists with status {status}; pass conflict='overwrite' or conflict='skip'`
 
 Warnings:
 - `migration: cascade disabled; dependents will not be migrated`
@@ -275,7 +279,7 @@ Warnings:
 
 ## Logging
 - For all migrations, append `migrated` events in both dirs.
-- If `force_overwrite=True`, append `migration_overwrite` event to both dirs:
+- If `conflict="overwrite"`, append `migration_overwrite` event to both dirs:
   - `reason = "force_overwrite"`
 - Record `default_values` in `MigrationRecord` and migration events.
 
@@ -301,7 +305,7 @@ Add tests for:
 3) Extra fields require drop_fields
 4) Initialized target candidate search uses to_obj values
 5) Cascading data -> subclass migration updates dependent hashes
-6) apply_migration conflict behavior (throw / skip / force_overwrite)
+6) apply_migration conflict behavior (throw / skip / overwrite)
 7) get_state is alias-aware for target dir
 
 ## Examples
