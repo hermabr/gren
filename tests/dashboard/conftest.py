@@ -29,7 +29,7 @@ from fastapi.testclient import TestClient
 
 from gren.config import GREN_CONFIG
 from gren.dashboard.main import app
-from gren.serialization import DEFAULT_GREN_VERSION, GrenSerializer
+from gren.serialization import GrenSerializer
 from gren.storage import (
     MetadataManager,
     MigrationManager,
