@@ -12,7 +12,7 @@ from ..serialization.serializer import JsonValue
 
 RootKind = Literal["data", "git"]
 MigrationPolicy = Literal["alias", "move", "copy"]
-MigrationKind = Literal["alias", "migrated"]
+MigrationKind = Literal["alias", "moved", "copied", "migrated"]
 
 
 class MigrationRecord(BaseModel):

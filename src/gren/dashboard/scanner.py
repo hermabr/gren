@@ -54,12 +54,38 @@ def _get_class_name(namespace: str) -> str:
     return parts[-1] if parts else namespace
 
 
+def _migration_kind(migration: MigrationRecord | None) -> str | None:
+    if migration is None:
+        return None
+    if migration.kind == "migrated":
+        return None
+    return migration.kind
+
+
+def _override_summary_attempts(
+    summary: ExperimentSummary, state: _GrenState
+) -> ExperimentSummary:
+    attempt = state.attempt
+    return summary.model_copy(
+        update={
+            "attempt_status": attempt.status if attempt else None,
+            "attempt_number": attempt.number if attempt else None,
+            "backend": attempt.backend if attempt else None,
+            "hostname": attempt.owner.hostname if attempt else None,
+            "user": attempt.owner.user if attempt else None,
+            "started_at": attempt.started_at if attempt else None,
+        }
+    )
+
+
 def _state_to_summary(
     state: _GrenState,
     namespace: str,
     gren_hash: str,
     migration: MigrationRecord | None = None,
     original_status: str | None = None,
+    original_namespace: str | None = None,
+    original_hash: str | None = None,
 ) -> ExperimentSummary:
     """Convert a Gren state to an experiment summary."""
     attempt = state.attempt
@@ -76,7 +102,7 @@ def _state_to_summary(
         backend=attempt.backend if attempt else None,
         hostname=attempt.owner.hostname if attempt else None,
         user=attempt.owner.user if attempt else None,
-        migration_kind=migration.kind if migration else None,
+        migration_kind=_migration_kind(migration) if migration else None,
         migration_policy=migration.policy if migration else None,
         migrated_at=migration.migrated_at if migration else None,
         overwritten_at=migration.overwritten_at if migration else None,
@@ -87,66 +113,6 @@ def _state_to_summary(
         to_namespace=migration.to_namespace if migration else None,
         to_hash=migration.to_hash if migration else None,
         original_result_status=original_status,
-    )
-
-
-def _override_summary_attempts(
-    summary: ExperimentSummary, state: _GrenState
-) -> ExperimentSummary:
-    attempt = state.attempt
-    return summary.model_copy(
-        update={
-            "attempt_status": attempt.status if attempt else None,
-            "attempt_number": attempt.number if attempt else None,
-            "started_at": attempt.started_at if attempt else None,
-            "backend": attempt.backend if attempt else None,
-            "hostname": attempt.owner.hostname if attempt else None,
-            "user": attempt.owner.user if attempt else None,
-        }
-    )
-
-
-def _state_to_detail(
-    state: _GrenState,
-    namespace: str,
-    gren_hash: str,
-    directory: Path,
-    metadata: JsonDict | None,
-    migration: MigrationRecord | None = None,
-    original_status: str | None = None,
-    original_namespace: str | None = None,
-    original_hash: str | None = None,
-) -> ExperimentDetail:
-    """Convert a Gren state to a detailed experiment record."""
-    attempt = state.attempt
-    attempt_detail = StateAttempt.from_internal(attempt) if attempt else None
-
-    return ExperimentDetail(
-        namespace=namespace,
-        gren_hash=gren_hash,
-        class_name=_get_class_name(namespace),
-        result_status=state.result.status,
-        attempt_status=attempt.status if attempt else None,
-        attempt_number=attempt.number if attempt else None,
-        updated_at=state.updated_at,
-        started_at=attempt.started_at if attempt else None,
-        directory=str(directory),
-        state=state.model_dump(mode="json"),
-        metadata=metadata,
-        attempt=attempt_detail,
-        migration_kind=migration.kind if migration else None,
-        migration_policy=migration.policy if migration else None,
-        migrated_at=migration.migrated_at if migration else None,
-        overwritten_at=migration.overwritten_at if migration else None,
-        migration_origin=migration.origin if migration else None,
-        migration_note=migration.note if migration else None,
-        from_namespace=migration.from_namespace if migration else None,
-        from_hash=migration.from_hash if migration else None,
-        to_namespace=migration.to_namespace if migration else None,
-        to_hash=migration.to_hash if migration else None,
-        original_result_status=original_status,
-        original_namespace=original_namespace,
-        original_hash=original_hash,
     )
 
 
@@ -261,6 +227,7 @@ def scan_experiments(
         List of experiment summaries, sorted by updated_at (newest first)
     """
     experiments: list[ExperimentSummary] = []
+    seen_original: set[tuple[str, str, str]] = set()
 
     # Parse datetime filters
     started_after_dt = _parse_datetime(started_after)
@@ -293,13 +260,30 @@ def scan_experiments(
                     and state.result.status == "migrated"
                     and original_status == "success"
                 )
+                original_key = (
+                    migration.from_namespace,
+                    migration.from_hash,
+                    migration.from_root,
+                )
                 if view == "original":
+                    if original_key in seen_original:
+                        continue
+                    seen_original.add(original_key)
                     state = original_state
                     namespace = migration.from_namespace
                     gren_hash = migration.from_hash
                     metadata_dir = original_dir
                 elif alias_active:
                     metadata_dir = original_dir
+            elif view == "original":
+                original_key = (
+                    namespace,
+                    gren_hash,
+                    MigrationManager.root_kind_for_dir(experiment_dir),
+                )
+                if original_key in seen_original:
+                    continue
+                seen_original.add(original_key)
 
             summary = _state_to_summary(
                 state,
@@ -307,6 +291,8 @@ def scan_experiments(
                 gren_hash,
                 migration=migration,
                 original_status=original_status,
+                original_namespace=migration.from_namespace if migration else None,
+                original_hash=migration.from_hash if migration else None,
             )
 
             if (
@@ -418,43 +404,65 @@ def get_experiment_detail(
         experiment_dir = root / namespace_path / gren_hash
         state_path = StateManager.get_state_path(experiment_dir)
 
-        if state_path.is_file():
-            state = StateManager.read_state(experiment_dir)
-            migration = MigrationManager.read_migration(experiment_dir)
-            metadata = _read_metadata_with_defaults(
-                experiment_dir,
-                migration if view == "resolved" else None,
-            )
-            original_status: str | None = None
-            original_namespace: str | None = None
-            original_hash: str | None = None
+        if not state_path.is_file():
+            continue
 
-            if migration is not None and migration.kind == "alias":
-                original_dir = MigrationManager.resolve_dir(migration, target="from")
-                original_state = StateManager.read_state(original_dir)
-                original_status = original_state.result.status
-                original_namespace = migration.from_namespace
-                original_hash = migration.from_hash
-                if view == "original":
-                    state = original_state
-                    metadata = MetadataManager.read_metadata_raw(original_dir)
-                    experiment_dir = original_dir
-                    namespace = original_namespace
-                    gren_hash = original_hash
-                else:
-                    metadata = _read_metadata_with_defaults(original_dir, migration)
+        state = StateManager.read_state(experiment_dir)
+        migration = MigrationManager.read_migration(experiment_dir)
+        metadata = _read_metadata_with_defaults(
+            experiment_dir,
+            migration if view == "resolved" else None,
+        )
+        original_status: str | None = None
+        original_namespace: str | None = None
+        original_hash: str | None = None
 
-            return _state_to_detail(
-                state,
-                namespace,
-                gren_hash,
-                experiment_dir,
-                metadata,
-                migration=migration,
-                original_status=original_status,
-                original_namespace=original_namespace,
-                original_hash=original_hash,
-            )
+        if migration is not None and migration.kind == "alias":
+            original_dir = MigrationManager.resolve_dir(migration, target="from")
+            original_state = StateManager.read_state(original_dir)
+            original_status = original_state.result.status
+            original_namespace = migration.from_namespace
+            original_hash = migration.from_hash
+            if view == "original":
+                state = original_state
+                metadata = MetadataManager.read_metadata_raw(original_dir)
+                experiment_dir = original_dir
+                namespace = original_namespace
+                gren_hash = original_hash
+            else:
+                metadata = _read_metadata_with_defaults(original_dir, migration)
+
+        attempt = state.attempt
+        return ExperimentDetail(
+            namespace=namespace,
+            gren_hash=gren_hash,
+            class_name=_get_class_name(namespace),
+            result_status=state.result.status,
+            attempt_status=attempt.status if attempt else None,
+            attempt_number=attempt.number if attempt else None,
+            updated_at=state.updated_at,
+            started_at=attempt.started_at if attempt else None,
+            backend=attempt.backend if attempt else None,
+            hostname=attempt.owner.hostname if attempt else None,
+            user=attempt.owner.user if attempt else None,
+            directory=str(experiment_dir),
+            state=state.model_dump(mode="json"),
+            metadata=metadata,
+            attempt=StateAttempt.from_internal(attempt) if attempt else None,
+            migration_kind=_migration_kind(migration) if migration else None,
+            migration_policy=migration.policy if migration else None,
+            migrated_at=migration.migrated_at if migration else None,
+            overwritten_at=migration.overwritten_at if migration else None,
+            migration_origin=migration.origin if migration else None,
+            migration_note=migration.note if migration else None,
+            from_namespace=migration.from_namespace if migration else None,
+            from_hash=migration.from_hash if migration else None,
+            to_namespace=migration.to_namespace if migration else None,
+            to_hash=migration.to_hash if migration else None,
+            original_result_status=original_status,
+            original_namespace=original_namespace,
+            original_hash=original_hash,
+        )
 
     return None
 

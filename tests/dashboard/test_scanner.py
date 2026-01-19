@@ -70,7 +70,7 @@ def test_scan_experiments_filter_namespace(populated_gren_root: Path) -> None:
         assert exp.namespace.startswith("dashboard.pipelines")
 
     original = scan_experiments(namespace_prefix="dashboard.pipelines", view="original")
-    assert len(original) == 7
+    assert len(original) == 6
 
 
 def test_scan_experiments_sorted_by_updated_at(temp_gren_root: Path) -> None:

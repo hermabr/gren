@@ -255,7 +255,7 @@ class Gren[T](ABC):
         """Check if result exists and is valid."""
         logger = get_logger()
         directory = self._base_gren_dir()
-        state = StateManager.read_state(directory)
+        state = self.get_state(directory)
 
         if not isinstance(state.result, _StateResultSuccess):
             logger.info("exists %s -> false", directory)
@@ -364,6 +364,7 @@ class Gren[T](ABC):
                                 # Valid success! Return immediately.
                                 # Since we didn't read state, we skip the logging below for speed
                                 # or we can log a minimal message if needed.
+                                ok = True
                                 self._log_console_start(action_color="green")
                                 return self._load()
                         except Exception as e:
@@ -556,7 +557,7 @@ class Gren[T](ABC):
 
     def _migration_target_dir(self, directory: Path) -> Path | None:
         record = self._alias_record(directory)
-        if record is None or record.kind != "alias":
+        if record is None:
             return None
         return MigrationManager.resolve_dir(record, target="from")
 

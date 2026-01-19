@@ -59,33 +59,71 @@ class MigrationCandidate:
         if not values:
             return self
         updated_defaults = dict(self.defaults_applied)
-        updated_config = dict(self.to_config)
-        for field, value in values.items():
-            updated_defaults[field] = value
-            updated_config[field] = _serialize_value(value)
-        to_hash = GrenSerializer.compute_hash(updated_config)
-        to_ref = _build_target_ref(
-            _resolve_target_class(self.to_namespace),
-            self.to_namespace,
-            to_hash,
-        )
-        updated_candidate = MigrationCandidate(
-            from_ref=self.from_ref,
-            to_ref=to_ref,
-            to_namespace=self.to_namespace,
-            to_config=updated_config,
-            defaults_applied=updated_defaults,
-            fields_dropped=self.fields_dropped,
-            missing_fields=self.missing_fields,
-            extra_fields=self.extra_fields,
-        )
-        return updated_candidate
+        updated_defaults.update(values)
+        return _rebuild_candidate_with_defaults(self, dict(values), updated_defaults)
 
 
 @dataclass(frozen=True)
 class MigrationSkip:
     candidate: MigrationCandidate
     reason: str
+
+
+def _rebuild_candidate_with_defaults(
+    candidate: MigrationCandidate,
+    new_defaults: dict[str, MigrationValue],
+    defaults_applied: dict[str, MigrationValue],
+) -> MigrationCandidate:
+    target_class = _resolve_target_class(candidate.to_namespace)
+    updated_config = _typed_config(dict(candidate.to_config))
+
+    target_fields = _target_field_names(target_class)
+    config_keys = set(updated_config.keys()) - {"__class__"}
+    conflicts = set(new_defaults) & config_keys
+    if conflicts:
+        raise ValueError(
+            "migration: default_values provided for existing fields: "
+            f"{_format_fields(conflicts)}"
+        )
+    unknown = set(new_defaults) - set(target_fields)
+    if unknown:
+        raise ValueError(
+            "migration: default_values contains fields not in target schema: "
+            f"{_format_fields(unknown)}"
+        )
+
+    for field, value in new_defaults.items():
+        updated_config[field] = _serialize_value(value)
+
+    updated_config["__class__"] = candidate.to_namespace
+    _typecheck_config(updated_config)
+
+    config_keys = set(updated_config.keys()) - {"__class__"}
+    missing_fields = sorted(set(target_fields) - config_keys)
+    if missing_fields:
+        raise ValueError(
+            "migration: missing required fields for target class: "
+            f"{_format_fields(missing_fields)}"
+        )
+    extra_fields = sorted(config_keys - set(target_fields))
+    if extra_fields:
+        raise ValueError(
+            "migration: extra fields present; use drop_fields to remove: "
+            f"{_format_fields(extra_fields)}"
+        )
+
+    to_hash = GrenSerializer.compute_hash(updated_config)
+    to_ref = _build_target_ref(target_class, candidate.to_namespace, to_hash)
+    return MigrationCandidate(
+        from_ref=candidate.from_ref,
+        to_ref=to_ref,
+        to_namespace=candidate.to_namespace,
+        to_config=updated_config,
+        defaults_applied=defaults_applied,
+        fields_dropped=candidate.fields_dropped,
+        missing_fields=missing_fields,
+        extra_fields=extra_fields,
+    )
 
 
 MigrationPolicy = Literal["alias", "move", "copy"]
@@ -422,7 +460,7 @@ def _apply_single_migration(
 
     if policy in {"move", "copy"}:
         _transfer_payload(from_dir, to_dir, policy)
-        _copy_state(from_dir, to_dir)
+        _copy_state(from_dir, to_dir, clear_source=policy == "move")
     else:
         _write_migrated_state(to_dir)
 
@@ -432,7 +470,7 @@ def _apply_single_migration(
 
     default_values = _serialize_default_values(candidate.defaults_applied)
     record = MigrationRecord(
-        kind="alias",
+        kind=_kind_for_policy(policy),
         policy=policy,
         from_namespace=candidate.from_ref.namespace,
         from_hash=candidate.from_ref.gren_hash,
@@ -511,7 +549,7 @@ def _transfer_payload(from_dir: Path, to_dir: Path, policy: MigrationPolicy) -> 
             shutil.copy2(item, destination)
 
 
-def _copy_state(from_dir: Path, to_dir: Path) -> None:
+def _copy_state(from_dir: Path, to_dir: Path, *, clear_source: bool) -> None:
     src_internal = from_dir / StateManager.INTERNAL_DIR
     if not src_internal.exists():
         return
@@ -523,6 +561,9 @@ def _copy_state(from_dir: Path, to_dir: Path) -> None:
     success_marker = StateManager.get_success_marker_path(from_dir)
     if success_marker.is_file():
         shutil.copy2(success_marker, StateManager.get_success_marker_path(to_dir))
+    if clear_source:
+        _write_migrated_state(from_dir)
+        StateManager.get_success_marker_path(from_dir).unlink(missing_ok=True)
 
 
 def _write_migrated_state(directory: Path) -> None:
@@ -531,6 +572,16 @@ def _write_migrated_state(directory: Path) -> None:
         state.attempt = None
 
     StateManager.update_state(directory, mutate)
+
+
+def _kind_for_policy(policy: MigrationPolicy) -> Literal["alias", "moved", "copied"]:
+    if policy == "alias":
+        return "alias"
+    if policy == "move":
+        return "moved"
+    if policy == "copy":
+        return "copied"
+    raise ValueError(f"Unsupported migration policy: {policy}")
 
 
 def _iter_source_configs(

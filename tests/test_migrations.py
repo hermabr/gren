@@ -61,6 +61,41 @@ class AddedFieldV2(gren.Gren[int]):
         return int((self.gren_dir / "value.txt").read_text())
 
 
+class SameClassV1(gren.Gren[int]):
+    name: str = gren.chz.field(default="")
+
+    def _create(self) -> int:
+        (self.gren_dir / "value.txt").write_text(self.name)
+        return len(self.name)
+
+    def _load(self) -> int:
+        return len((self.gren_dir / "value.txt").read_text())
+
+
+class SameClassV2Required(gren.Gren[int]):
+    name: str = gren.chz.field(default="")
+    language: str = gren.chz.field()
+
+    def _create(self) -> int:
+        (self.gren_dir / "value.txt").write_text(f"{self.name}:{self.language}")
+        return len(self.name)
+
+    def _load(self) -> int:
+        return len((self.gren_dir / "value.txt").read_text().split(":")[0])
+
+
+class SameClassV2Optional(gren.Gren[int]):
+    name: str = gren.chz.field(default="")
+    language: str = gren.chz.field(default="spanish")
+
+    def _create(self) -> int:
+        (self.gren_dir / "value.txt").write_text(f"{self.name}:{self.language}")
+        return len(self.name)
+
+    def _load(self) -> int:
+        return len((self.gren_dir / "value.txt").read_text().split(":")[0])
+
+
 def _events_for(directory) -> list[dict[str, str | int]]:
     path = StateManager.get_events_path(directory)
     if not path.is_file():
@@ -85,13 +120,16 @@ def test_migrate_move_transfers_payload(gren_tmp_root) -> None:
 
     to_record = MigrationManager.read_migration(to_dir)
     assert to_record is not None
-    assert to_record.kind == "alias"
+    assert to_record.kind == "moved"
     assert to_record.policy == "move"
 
     from_record = MigrationManager.read_migration(from_dir)
     assert from_record is not None
     assert from_record.kind == "migrated"
     assert from_record.policy == "move"
+
+    from_state = StateManager.read_state(from_dir)
+    assert isinstance(from_state.result, _StateResultMigrated)
 
 
 def test_migrate_alias_force_recompute_detaches(gren_tmp_root, monkeypatch) -> None:
@@ -185,6 +223,70 @@ def test_migrate_alias_with_added_field_default(gren_tmp_root) -> None:
     assert alias_record is not None
     assert alias_record.kind == "alias"
     assert alias_record.default_values == {"extra": "default"}
+
+    alias_state = StateManager.read_state(to_obj._base_gren_dir())
+    assert isinstance(alias_state.result, _StateResultMigrated)
+
+    assert to_obj.load_or_create() == 5
+
+
+def test_migrate_same_class_add_required_field(gren_tmp_root) -> None:
+    from_obj = SameClassV1(name="mnist")
+
+    assert from_obj.load_or_create() == 5
+
+    candidates = gren.find_migration_candidates(
+        namespace=gren.NamespacePair(
+            from_namespace="test_migrations.SameClassV1",
+            to_namespace="test_migrations.SameClassV2Required",
+        ),
+        default_values={"language": "english"},
+    )
+    assert len(candidates) == 1
+
+    gren.apply_migration(
+        candidates[0],
+        policy="alias",
+        origin="tests",
+        note="add-language",
+    )
+
+    to_obj = SameClassV2Required(name="mnist", language="english")
+    alias_record = MigrationManager.read_migration(to_obj._base_gren_dir())
+    assert alias_record is not None
+    assert alias_record.default_values == {"language": "english"}
+
+    alias_state = StateManager.read_state(to_obj._base_gren_dir())
+    assert isinstance(alias_state.result, _StateResultMigrated)
+
+    assert to_obj.load_or_create() == 5
+
+
+def test_migrate_same_class_add_optional_field_default(gren_tmp_root) -> None:
+    from_obj = SameClassV1(name="mnist")
+
+    assert from_obj.load_or_create() == 5
+
+    candidates = gren.find_migration_candidates(
+        namespace=gren.NamespacePair(
+            from_namespace="test_migrations.SameClassV1",
+            to_namespace="test_migrations.SameClassV2Optional",
+        ),
+        default_fields=["language"],
+    )
+    assert len(candidates) == 1
+
+    gren.apply_migration(
+        candidates[0],
+        policy="alias",
+        origin="tests",
+        note="default-language",
+    )
+
+    to_obj = SameClassV2Optional(name="mnist")
+    alias_record = MigrationManager.read_migration(to_obj._base_gren_dir())
+    assert alias_record is not None
+    assert alias_record.default_values == {"language": "spanish"}
 
     alias_state = StateManager.read_state(to_obj._base_gren_dir())
     assert isinstance(alias_state.result, _StateResultMigrated)

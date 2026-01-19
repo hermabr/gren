@@ -55,7 +55,7 @@ def test_list_experiments(client: TestClient, populated_gren_root: Path) -> None
     response_original = client.get("/api/experiments?view=original")
     assert response_original.status_code == 200
     original_data = response_original.json()
-    assert original_data["total"] == 7
+    assert original_data["total"] == 6
 
 
 def test_list_experiments_filter_by_result_status(
@@ -105,7 +105,7 @@ def test_list_experiments_filter_by_namespace(
     )
     assert original_view.status_code == 200
     data = original_view.json()
-    assert data["total"] == 7
+    assert data["total"] == 6
 
 
 def test_list_experiments_filter_by_class(

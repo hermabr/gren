@@ -81,6 +81,11 @@ class MigrationCandidate:
     extra_fields: list[str]
 ```
 
+`MigrationCandidate.with_default_values()` must re-run default and schema validation
+(the same rules enforced in `_build_candidate`). It is not allowed to inject fields
+that are not in the target schema or to override existing values without dropping
+fields explicitly.
+
 ### MigrationSkip
 ```
 @dataclass(frozen=True)
@@ -221,7 +226,7 @@ Behavior:
 
 ## Validation Rules (Strict)
 
-When building candidates:
+When building candidates or applying default overrides:
 
 1) Start from old metadata `gren_obj`.
 2) Drop fields from `drop_fields`.
@@ -276,12 +281,16 @@ Warnings:
 - Implement `Gren.get_state()` as a general alias-aware method.
 - Use this in `apply_migration` to check target state.
 - Alias awareness must not be hard-coded in migration functions.
+- `Gren.exists()` should be alias-aware: if a migration alias is active and the
+  original state is successful, `exists()` returns True.
 
 ## Logging
 - For all migrations, append `migrated` events in both dirs.
 - If `conflict="overwrite"`, append `migration_overwrite` event to both dirs:
   - `reason = "force_overwrite"`
 - Record `default_values` in `MigrationRecord` and migration events.
+- For `policy="move"`, the source directory must be marked as migrated/absent or
+  have its success marker cleared so `exists()` does not report success.
 
 ## Cascading (Default)
 - When applying migration, find dependents by scanning metadata for nested `gren_obj`.
@@ -297,6 +306,8 @@ Warnings:
 - No try/except for control flow.
 - Always update `CHANGELOG.md` for user-visible change.
 - Use `make lint` / `make test` / `make dashboard-test` / `make dashboard-test-e2e`.
+- For `view="original"`, avoid returning duplicate experiments when aliases are present.
+- Migration record `kind` should match policy semantics (aliases vs moved/copied).
 
 ## Test Plan
 Add tests for:
@@ -307,6 +318,8 @@ Add tests for:
 5) Cascading data -> subclass migration updates dependent hashes
 6) apply_migration conflict behavior (throw / skip / overwrite)
 7) get_state is alias-aware for target dir
+8) Same-class migrations adding required fields with explicit defaults
+9) Same-class migrations adding optional fields via class defaults
 
 ## Examples
 

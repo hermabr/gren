@@ -1,10 +1,13 @@
 # Changelog
 
-## v0.2.0
+## v1.0.0
 - Add explicit migration alias tracking with overwrite logging and dashboard views for aliased vs original experiments.
 - Tighten initialized-target migration candidate filtering to avoid mismatched configs.
 - Update migration tests for initialized-target matching and explicit defaults.
 - Allow migration record parsing to ignore old version fields in persisted metadata.
+- Revalidate defaults applied post-candidate and make exists() alias-aware.
+- Record moved/copied migration kinds and dedupe original-view aliases in the dashboard.
+- Mark moved sources as migrated and add same-class field-addition migration tests.
 - Update state migration handling to store migrated status in state.json and keep migration metadata in migration.json.
 - Add migration regression tests for rename/added-field alias cases plus recompute detach events.
 - Extend dashboard e2e fixtures/tests to cover migrated experiment tags and original/aliased navigation.
