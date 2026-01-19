@@ -16,7 +16,7 @@ MigrationKind = Literal["alias", "migrated"]
 
 
 class MigrationRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="ignore", strict=True)
 
     kind: MigrationKind
     policy: MigrationPolicy

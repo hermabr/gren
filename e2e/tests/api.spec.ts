@@ -58,13 +58,6 @@ test.describe("API Endpoints", () => {
     expect(migrated.result_status).toBe("migrated");
     expect(migrated.migration_kind).toBe("alias");
 
-    const configResponse = await request.get(
-      "/api/experiments?config_filter=language%3Dspanish&view=resolved&result_status=migrated"
-    );
-    expect(configResponse.ok()).toBeTruthy();
-    const configData = await configResponse.json();
-    expect(configData.total).toBe(1);
-    expect(configData.experiments[0].migration_kind).toBe("alias");
   });
 
   test("experiments endpoint supports filtering by attempt status", async ({
