@@ -41,7 +41,14 @@ def _create_migrated_alias() -> None:
             to_namespace="my_project.pipelines.PrepareDataset",
         ),
         default_values={"name": "mnist-v2"},
+        drop_fields=["name"],
     )
+    target_hash = dataset_old._gren_hash
+    candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.from_ref.gren_hash == target_hash
+    ]
     if not candidates:
         raise ValueError("migration: no candidates found for target class")
     if len(candidates) != 1:
