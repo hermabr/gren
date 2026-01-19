@@ -23,10 +23,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "examples"))
 
+import gren
 from gren.config import GREN_CONFIG
 from gren.serialization import GrenSerializer
 from gren.storage import MetadataManager, StateManager
-from gren import migrate
 
 # Import from the examples module which has proper module paths
 from my_project.pipelines import PrepareDataset, TrainModel, TrainTextModel  # type: ignore[import-not-found]
@@ -35,13 +35,24 @@ from my_project.pipelines import PrepareDataset, TrainModel, TrainTextModel  # t
 def _create_migrated_alias() -> None:
     dataset_old = PrepareDataset(name="mnist")
     dataset_old.load_or_create()
-    dataset_alias = PrepareDataset(name="mnist-v2")
-    migrate(
-        dataset_old,
-        dataset_alias,
+    candidates = gren.find_migration_candidates(
+        namespace=gren.NamespacePair(
+            from_namespace="my_project.pipelines.PrepareDataset",
+            to_namespace="my_project.pipelines.PrepareDataset",
+        ),
+        default_values={"name": "mnist-v2"},
+    )
+    if not candidates:
+        raise ValueError("migration: no candidates found for target class")
+    if len(candidates) != 1:
+        raise ValueError("migration: expected exactly one candidate")
+    gren.apply_migration(
+        candidates[0],
         policy="alias",
+        cascade=True,
         origin="e2e",
         note="migration fixture",
+        conflict="throw",
     )
 
 
