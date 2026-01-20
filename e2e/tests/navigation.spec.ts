@@ -283,6 +283,12 @@ test.describe("Navigation", () => {
 
       const resultStatusSelect = page.getByRole("combobox").first();
       await resultStatusSelect.selectOption("success");
+
+      const configInput = page.getByPlaceholder(
+        "field.path=value (e.g., model.name=gpt-4)"
+      );
+      await configInput.fill("name=toy");
+
       await expect(page.getByText(/Showing \d+ of [1-9]\d* experiments/)).toBeVisible();
 
       await page.locator("table tbody tr").first().locator("a").first().click();

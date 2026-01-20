@@ -94,6 +94,11 @@ test.describe("Experiments Page", () => {
     await expect(originalLink).toBeVisible();
     await originalLink.click();
 
+    const expectedAliasHashes = [
+      "91e3f929e8cfee3288cf",
+      "c274e94e4acae91dd6b7",
+    ].sort();
+
     await expect
       .poll(async () => {
         const response = await page.request.get(
@@ -102,14 +107,10 @@ test.describe("Experiments Page", () => {
         if (!response.ok()) {
           return null;
         }
-        return response.json();
+        const data = await response.json();
+        return data.alias_hashes ? [...data.alias_hashes].sort() : null;
       })
-      .toMatchObject({
-        alias_hashes: [
-          "91e3f929e8cfee3288cf",
-          "c274e94e4acae91dd6b7",
-        ],
-      });
+      .toEqual(expectedAliasHashes);
 
     await page.waitForLoadState("networkidle");
 
