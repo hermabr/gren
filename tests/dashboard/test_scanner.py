@@ -12,6 +12,7 @@ from gren.dashboard.scanner import (
     scan_experiments,
 )
 from gren.serialization import GrenSerializer
+from gren.storage import MigrationManager
 
 from .conftest import create_experiment_from_gren
 from .pipelines import PrepareDataset, TrainModel
@@ -141,6 +142,22 @@ def test_get_experiment_detail_found(populated_gren_root: Path) -> None:
 
     assert detail.alias_hashes is not None
     assert len(detail.alias_hashes) == 2
+
+    alias_dir = alias._base_gren_dir()
+    alias_record = MigrationManager.read_migration(alias_dir)
+    assert alias_record is not None
+    MigrationManager.write_migration(
+        alias_record.model_copy(update={"overwritten_at": "2025-01-06T00:00:00+00:00"}),
+        alias_dir,
+    )
+    alias_filtered = get_experiment_detail(
+        "dashboard.pipelines.PrepareDataset", gren_hash, view="resolved"
+    )
+    assert alias_filtered is not None
+    assert alias_filtered.alias_hashes is not None
+    assert len(alias_filtered.alias_hashes) == 1
+
+    MigrationManager.write_migration(alias_record, alias_dir)
 
     alias_original = get_experiment_detail(
         "dashboard.pipelines.PrepareDataset", alias_hash, view="original"

@@ -106,12 +106,20 @@ class GrenSerializer:
                     **{
                         name: canonicalize(getattr(item, name))
                         for name in fields
-                        if not name.startswith("_")  # <--- Added filter
+                        if not name.startswith("_")
                     },
                 }
 
             if isinstance(item, dict):
-                return {k: canonicalize(v) for k, v in sorted(item.items())}
+                filtered = item
+                if cls.CLASS_MARKER in item:
+                    filtered = {
+                        k: v
+                        for k, v in item.items()
+                        if not (isinstance(k, str) and k.startswith("_"))
+                        or k == cls.CLASS_MARKER
+                    }
+                return {k: canonicalize(v) for k, v in sorted(filtered.items())}
 
             if isinstance(item, (list, tuple)):
                 return [canonicalize(v) for v in item]

@@ -14,6 +14,7 @@
 - Add migration regression tests for rename/added-field alias cases plus recompute detach events.
 - Extend dashboard e2e fixtures/tests to cover migrated experiment tags and original/aliased navigation.
 - Ensure alias links are exposed in original experiment detail responses for UI navigation.
+- Ignore private fields when hashing migration configs and experiment objects.
 - Warn when migrating experiments that are not in a success state.
 - Support migration default values for alias metadata (for adding fields with defaults).
 

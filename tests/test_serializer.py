@@ -41,9 +41,17 @@ def test_to_dict_from_dict_roundtrip() -> None:
 def test_compute_hash_ignores_private_fields() -> None:
     a = Foo(a=1, p=Path("x/y"), _private=1)
     b = Foo(a=1, p=Path("x/y"), _private=999)
-    assert gren.GrenSerializer.compute_hash(
-        a
-    ) == gren.GrenSerializer.compute_hash(b)
+    assert gren.GrenSerializer.compute_hash(a) == gren.GrenSerializer.compute_hash(b)
+
+
+def test_hash_ignores_private_fields_in_config() -> None:
+    obj = Foo(a=1, p=Path("x/y"), _private=7)
+    data = gren.GrenSerializer.to_dict(obj)
+    assert "_private" in data
+    data["_private"] = 999
+    assert gren.GrenSerializer.compute_hash(data) == gren.GrenSerializer.compute_hash(
+        obj
+    )
 
 
 def test_to_python_is_evaluable() -> None:

@@ -59,6 +59,8 @@ def _collect_aliases() -> dict[tuple[str, str, str], list[MigrationRecord]]:
             migration = MigrationManager.read_migration(experiment_dir)
             if migration is None or migration.kind != "alias":
                 continue
+            if migration.overwritten_at is not None:
+                continue
             aliases[_alias_key(migration)].append(migration)
     return aliases
 

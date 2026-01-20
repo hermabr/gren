@@ -270,6 +270,10 @@ class Gren[T](ABC):
         directory = self._base_gren_dir()
         return MetadataManager.read_metadata(directory)
 
+    def get_migration_record(self: Self) -> MigrationRecord | None:
+        """Get migration record for this object."""
+        return MigrationManager.read_migration(self._base_gren_dir())
+
     @overload
     def load_or_create(self, executor: submitit.Executor) -> T | submitit.Job[T]: ...
 

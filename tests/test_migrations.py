@@ -337,6 +337,9 @@ def test_migrate_alias_with_added_field_default(gren_tmp_root) -> None:
     )
     assert len(candidates) == 1
 
+    to_config = candidates[0].to_config
+    assert gren.GrenSerializer.compute_hash(to_config) == to_obj._gren_hash
+
     gren.apply_migration(
         candidates[0],
         policy="alias",
