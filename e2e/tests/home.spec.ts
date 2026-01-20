@@ -22,8 +22,8 @@ test.describe("Dashboard Home Page", () => {
     await expect(page.getByText("Successful")).toBeVisible();
     await expect(page.getByText("Failed", { exact: true })).toBeVisible();
 
-    // Verify stats value matches generated data (10 experiments)
-    await expect(page.getByTestId("stats-total-value")).toHaveText("10");
+    // Verify stats value matches generated data (14 experiments)
+    await expect(page.getByTestId("stats-total-value")).toHaveText("14");
   });
 
   test("should have working navigation", async ({ page }) => {

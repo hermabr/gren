@@ -9,7 +9,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Callable, Literal, TypedDict
+from typing import Annotated, Any, Callable, Literal, Mapping, TypedDict, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -22,6 +22,9 @@ SchedulerMetadata = dict[str, Any]
 
 # Type alias for probe results from submitit adapter
 ProbeResult = dict[str, Any]
+
+EventValue: TypeAlias = str | int | float | bool
+EventMapping: TypeAlias = Mapping[str, EventValue]
 
 
 class _LockInfoDict(TypedDict, total=False):
@@ -58,31 +61,34 @@ class _ErrorDict(TypedDict, total=False):
 class _StateResultBase(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True, strict=True)
 
-    status: str
-
 
 class _StateResultAbsent(_StateResultBase):
-    status: Literal["absent"]
+    status: Literal["absent"] = "absent"
 
 
 class _StateResultIncomplete(_StateResultBase):
-    status: Literal["incomplete"]
+    status: Literal["incomplete"] = "incomplete"
 
 
 class _StateResultSuccess(_StateResultBase):
-    status: Literal["success"]
+    status: Literal["success"] = "success"
     created_at: str
 
 
 class _StateResultFailed(_StateResultBase):
-    status: Literal["failed"]
+    status: Literal["failed"] = "failed"
+
+
+class _StateResultMigrated(_StateResultBase):
+    status: Literal["migrated"] = "migrated"
 
 
 _StateResult = Annotated[
     _StateResultAbsent
     | _StateResultIncomplete
     | _StateResultSuccess
-    | _StateResultFailed,
+    | _StateResultFailed
+    | _StateResultMigrated,
     Field(discriminator="status"),
 ]
 
@@ -103,6 +109,9 @@ def _coerce_result(current: _StateResult, **updates: str) -> _StateResult:
             return _StateResultSuccess(status="success", created_at=created_at)
         case "failed":
             return _StateResultFailed(status="failed")
+        case "migrated":
+            return _StateResultMigrated(status="migrated")
+
         case _:
             raise ValueError(f"Invalid result status: {status!r}")
 
@@ -157,7 +166,6 @@ class _StateAttemptBase(BaseModel):
     id: str
     number: int = 1
     backend: str
-    status: str
     started_at: str
     heartbeat_at: str
     lease_duration_sec: float
@@ -407,7 +415,9 @@ class StateManager:
         if not lines:
             return None
         data = json.loads(lines[0])
-        return data if isinstance(data, dict) else None
+        if isinstance(data, dict):
+            return data  # type: ignore[return-value]
+        return None
 
     @classmethod
     def _acquire_lock_blocking(
@@ -466,7 +476,7 @@ class StateManager:
             cls.release_lock(fd, lock_path)
 
     @classmethod
-    def append_event(cls, directory: Path, event: dict[str, str | int]) -> None:
+    def append_event(cls, directory: Path, event: EventMapping) -> None:
         path = cls.get_events_path(directory)
         enriched = {
             "ts": cls._iso_now(),
@@ -573,7 +583,7 @@ class StateManager:
             lease_expires_at = expires.isoformat(timespec="seconds")
             scheduler_state: SchedulerMetadata = scheduler or {}
 
-            attempt_common = dict(
+            attempt_kwargs = dict(
                 id=attempt_id,
                 number=int(number),
                 backend=backend,
@@ -584,7 +594,7 @@ class StateManager:
                 owner=owner_state,
                 scheduler=scheduler_state,
             )
-            state.attempt = attempt_cls(**attempt_common)
+            state.attempt = attempt_cls(**attempt_kwargs)  # type: ignore[arg-type, misc]
 
             state.result = _coerce_result(state.result, status="incomplete")
 
@@ -880,9 +890,7 @@ class StateManager:
                     owner=attempt.owner,
                     scheduler=attempt.scheduler,
                     ended_at=now,
-                    error=GrenErrorState(
-                        type="GrenComputeError", message=reason or ""
-                    ),
+                    error=GrenErrorState(type="GrenComputeError", message=reason or ""),
                     reason=reason,
                 )
             else:
@@ -1038,9 +1046,7 @@ def compute_lock(
                 "Cannot acquire lock: experiment already succeeded"
             )
         if isinstance(state.result, _StateResultFailed):
-            raise GrenLockNotAcquired(
-                "Cannot acquire lock: experiment already failed"
-            )
+            raise GrenLockNotAcquired("Cannot acquire lock: experiment already failed")
 
         # If no active attempt but lock exists, it's orphaned - clean it up
         if attempt is None or isinstance(

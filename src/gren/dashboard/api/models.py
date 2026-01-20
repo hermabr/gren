@@ -34,6 +34,18 @@ class ExperimentSummary(BaseModel):
     backend: str | None = None
     hostname: str | None = None
     user: str | None = None
+    # Migration metadata
+    migration_kind: str | None = None
+    migration_policy: str | None = None
+    migrated_at: str | None = None
+    overwritten_at: str | None = None
+    migration_origin: str | None = None
+    migration_note: str | None = None
+    from_namespace: str | None = None
+    from_hash: str | None = None
+    to_namespace: str | None = None
+    to_hash: str | None = None
+    original_result_status: str | None = None
 
 
 class ExperimentDetail(ExperimentSummary):
@@ -43,6 +55,10 @@ class ExperimentDetail(ExperimentSummary):
     state: JsonDict
     metadata: JsonDict | None = None
     attempt: StateAttempt | None = None
+    original_namespace: str | None = None
+    original_hash: str | None = None
+    alias_namespaces: list[str] | None = None
+    alias_hashes: list[str] | None = None
 
 
 class ExperimentList(BaseModel):

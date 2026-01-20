@@ -31,7 +31,6 @@ def clear_metadata_cache() -> None:
     _cached_git_info_time = 0.0
 
 
-
 class GitInfo(BaseModel):
     """Git repository information."""
 

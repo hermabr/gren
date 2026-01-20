@@ -12,6 +12,7 @@ from gren.dashboard.scanner import (
     scan_experiments,
 )
 from gren.serialization import GrenSerializer
+from gren.storage import MigrationManager
 
 from .conftest import create_experiment_from_gren
 from .pipelines import PrepareDataset, TrainModel
@@ -26,17 +27,40 @@ def test_scan_experiments_empty(temp_gren_root: Path) -> None:
 def test_scan_experiments_finds_all(populated_gren_root: Path) -> None:
     """Test that scanner finds all experiments."""
     experiments = scan_experiments()
-    # 6 experiments: dataset1, dataset2, train1, train2, eval1, loader
-    assert len(experiments) == 6
+    # 9 experiments: dataset1, dataset2, train1, train2, eval1, loader, alias, alias2, moved
+    assert len(experiments) == 9
 
 
 def test_scan_experiments_filter_result_status(populated_gren_root: Path) -> None:
     """Test filtering by result status."""
     experiments = scan_experiments(result_status="success")
-    # 3 successful: dataset1, train1, loader
-    assert len(experiments) == 3
+    # 4 successful: dataset1, train1, loader, dataset2 (moved source)
+    assert len(experiments) == 4
     for exp in experiments:
         assert exp.result_status == "success"
+
+    migrated = scan_experiments(result_status="migrated")
+    assert len(migrated) == 3
+    assert {exp.migration_kind for exp in migrated} == {"alias", "moved"}
+
+    moved = scan_experiments(result_status="migrated", migration_kind="moved")
+    assert len(moved) == 1
+    assert moved[0].migration_kind == "moved"
+
+    alias_policy = scan_experiments(
+        result_status="migrated",
+        migration_policy="alias",
+    )
+    assert len(alias_policy) == 2
+    assert all(exp.migration_policy == "alias" for exp in alias_policy)
+
+
+def test_scan_experiments_applies_migration_defaults(
+    populated_gren_root: Path,
+) -> None:
+    experiments = scan_experiments(config_filter="language=spanish")
+    assert len(experiments) == 1
+    assert experiments[0].migration_kind == "alias"
 
 
 def test_scan_experiments_filter_attempt_status(populated_gren_root: Path) -> None:
@@ -45,14 +69,20 @@ def test_scan_experiments_filter_attempt_status(populated_gren_root: Path) -> No
     assert len(experiments) == 1
     assert experiments[0].attempt_status == "failed"
 
+    resolved = scan_experiments(attempt_status="failed", view="resolved")
+    assert len(resolved) == 1
+
 
 def test_scan_experiments_filter_namespace(populated_gren_root: Path) -> None:
     """Test filtering by namespace prefix."""
     experiments = scan_experiments(namespace_prefix="dashboard.pipelines")
-    # All 6 experiments are in dashboard.pipelines
-    assert len(experiments) == 6
+    # All 9 experiments are in dashboard.pipelines
+    assert len(experiments) == 9
     for exp in experiments:
         assert exp.namespace.startswith("dashboard.pipelines")
+
+    original = scan_experiments(namespace_prefix="dashboard.pipelines", view="original")
+    assert len(original) == 7
 
 
 def test_scan_experiments_sorted_by_updated_at(temp_gren_root: Path) -> None:
@@ -87,8 +117,9 @@ def test_scan_experiments_sorted_by_updated_at(temp_gren_root: Path) -> None:
 
 
 def test_get_experiment_detail_found(populated_gren_root: Path) -> None:
-    """Test getting detail for an existing experiment."""
+    """Test getting experiment detail."""
     dataset1 = PrepareDataset(name="mnist", version="v1")
+    dataset2 = PrepareDataset(name="cifar", version="v2")
     gren_hash = GrenSerializer.compute_hash(dataset1)
 
     detail = get_experiment_detail("dashboard.pipelines.PrepareDataset", gren_hash)
@@ -98,6 +129,49 @@ def test_get_experiment_detail_found(populated_gren_root: Path) -> None:
     assert detail.result_status == "success"
     assert detail.metadata is not None
     assert "state" in detail.model_dump()
+
+    alias = PrepareDataset(name="mnist", version="v2")
+    alias_hash = GrenSerializer.compute_hash(alias)
+    alias_detail = get_experiment_detail(
+        "dashboard.pipelines.PrepareDataset", alias_hash, view="resolved"
+    )
+    assert alias_detail is not None
+    assert alias_detail.migration_kind == "alias"
+    assert alias_detail.original_result_status == "success"
+    assert alias_detail.alias_hashes is None
+
+    assert detail.alias_hashes is not None
+    assert len(detail.alias_hashes) == 2
+
+    alias_dir = alias._base_gren_dir()
+    alias_record = MigrationManager.read_migration(alias_dir)
+    assert alias_record is not None
+    MigrationManager.write_migration(
+        alias_record.model_copy(update={"overwritten_at": "2025-01-06T00:00:00+00:00"}),
+        alias_dir,
+    )
+    alias_filtered = get_experiment_detail(
+        "dashboard.pipelines.PrepareDataset", gren_hash, view="resolved"
+    )
+    assert alias_filtered is not None
+    assert alias_filtered.alias_hashes is not None
+    assert len(alias_filtered.alias_hashes) == 1
+
+    MigrationManager.write_migration(alias_record, alias_dir)
+
+    alias_original = get_experiment_detail(
+        "dashboard.pipelines.PrepareDataset", alias_hash, view="original"
+    )
+    assert alias_original is not None
+    assert alias_original.gren_hash == gren_hash
+
+    moved = PrepareDataset(name="mnist", version="v3")
+    moved_hash = GrenSerializer.compute_hash(moved)
+    moved_original = get_experiment_detail(
+        "dashboard.pipelines.PrepareDataset", moved_hash, view="original"
+    )
+    assert moved_original is not None
+    assert moved_original.gren_hash == GrenSerializer.compute_hash(dataset2)
 
 
 def test_get_experiment_detail_not_found(populated_gren_root: Path) -> None:
@@ -130,19 +204,21 @@ def test_get_stats_empty(temp_gren_root: Path) -> None:
 def test_get_stats_counts(populated_gren_root: Path) -> None:
     """Test that stats correctly count experiments."""
     stats = get_stats()
-    # 6 total: dataset1(success), train1(success), train2(running),
-    #          eval1(failed), loader(success), dataset2(absent)
-    assert stats.total == 6
-    assert stats.success_count == 3
+    # 9 total: dataset1(success), train1(success), train2(running),
+    #          eval1(failed), loader(success), dataset2(success moved source),
+    #          alias(migrated), alias2(migrated), moved(migrated)
+    assert stats.total == 9
+    assert stats.success_count == 4
     assert stats.failed_count == 1
     assert stats.running_count == 1
 
     # Check by_result_status
     result_map = {s.status: s.count for s in stats.by_result_status}
-    assert result_map["success"] == 3
+    assert result_map["success"] == 4
     assert result_map["failed"] == 1
     assert result_map["incomplete"] == 1
-    assert result_map["absent"] == 1
+    assert result_map.get("absent", 0) == 0
+    assert result_map["migrated"] == 3
 
 
 def test_scan_experiments_version_controlled(temp_gren_root: Path) -> None:
@@ -188,11 +264,11 @@ def test_scan_experiments_filter_by_class(populated_gren_root: Path) -> None:
 def test_scan_experiments_filter_by_backend(populated_gren_root: Path) -> None:
     """Test filtering experiments by backend."""
     # Fixture has: dataset1(local), train1(local), train2(submitit),
-    #              eval1(local), loader(submitit), dataset2(no attempt)
+    #              eval1(local), loader(submitit), dataset2(no attempt), alias(resolves)
 
     # Filter by local backend
     local_results = scan_experiments(backend="local")
-    assert len(local_results) == 3  # dataset1, train1, eval1
+    assert len(local_results) == 5  # dataset1, train1, eval1, aliases
     for exp in local_results:
         assert exp.backend == "local"
 
@@ -220,11 +296,11 @@ def test_scan_experiments_filter_by_backend_no_match(temp_gren_root: Path) -> No
 def test_scan_experiments_filter_by_hostname(populated_gren_root: Path) -> None:
     """Test filtering experiments by hostname."""
     # Fixture has: dataset1(gpu-01), train1(gpu-01), train2(gpu-02),
-    #              eval1(gpu-02), loader(gpu-01), dataset2(no attempt)
+    #              eval1(gpu-02), loader(gpu-01), dataset2(no attempt), alias(resolves)
 
     # Filter by gpu-01
     gpu01_results = scan_experiments(hostname="gpu-01")
-    assert len(gpu01_results) == 3  # dataset1, train1, loader
+    assert len(gpu01_results) == 5  # dataset1, train1, loader, aliases
     for exp in gpu01_results:
         assert exp.hostname == "gpu-01"
 
@@ -252,11 +328,11 @@ def test_scan_experiments_filter_by_hostname_no_match(temp_gren_root: Path) -> N
 def test_scan_experiments_filter_by_user(populated_gren_root: Path) -> None:
     """Test filtering experiments by user."""
     # Fixture has: dataset1(alice), train1(alice), train2(bob),
-    #              eval1(alice), loader(bob), dataset2(no attempt)
+    #              eval1(alice), loader(bob), dataset2(no attempt), alias(resolves)
 
     # Filter by alice
     alice_results = scan_experiments(user="alice")
-    assert len(alice_results) == 3  # dataset1, train1, eval1
+    assert len(alice_results) == 5  # dataset1, train1, eval1, aliases
     for exp in alice_results:
         assert exp.user == "alice"
 
@@ -288,7 +364,7 @@ def test_scan_experiments_filter_by_started_after(populated_gren_root: Path) -> 
 
     # Filter by started_after 2025-01-01 should exclude loader (2024) and dataset2 (no attempt)
     results = scan_experiments(started_after="2025-01-01T00:00:00+00:00")
-    assert len(results) == 4  # dataset1, train1, train2, eval1
+    assert len(results) == 6  # dataset1, train1, train2, eval1, aliases
     for exp in results:
         assert exp.started_at is not None
         assert exp.started_at >= "2025-01-01T00:00:00+00:00"
@@ -326,9 +402,9 @@ def test_scan_experiments_filter_by_updated_after(populated_gren_root: Path) -> 
     # Fixture has: loader(updated 2024-06-01), dataset1(2025-01-01), train1(2025-01-02),
     #              train2(2025-01-03), eval1(2025-01-04), dataset2(no attempt with default date)
 
-    # Filter by updated_after 2025-01-02 should get train1, train2, eval1
+    # Filter by updated_after 2025-01-02 should get train1, train2, eval1, aliases
     results = scan_experiments(updated_after="2025-01-02T00:00:00+00:00")
-    assert len(results) == 3  # train1, train2, eval1
+    assert len(results) == 5  # train1, train2, eval1, aliases
     for exp in results:
         assert exp.updated_at is not None
         assert exp.updated_at >= "2025-01-02T00:00:00+00:00"
@@ -427,7 +503,10 @@ def test_scan_experiments_combined_filters(populated_gren_root: Path) -> None:
     # - train2: running, submitit, gpu-02, bob, 2025-01-03
     # - eval1: failed, local, gpu-02, alice, 2025-01-04
     # - loader: success, submitit, gpu-01, bob, 2024-06-01
-    # - dataset2: absent, no attempt
+    # - dataset2: success (moved source)
+    # - alias: migrated (resolves to dataset1)
+    # - alias2: migrated (resolves to dataset1)
+    # - moved: migrated (points to dataset2)
 
     # Combine result_status + user: success + alice = dataset1, train1
     results = scan_experiments(result_status="success", user="alice")
@@ -436,9 +515,9 @@ def test_scan_experiments_combined_filters(populated_gren_root: Path) -> None:
         assert exp.user == "alice"
         assert exp.result_status == "success"
 
-    # Combine backend + hostname: local + gpu-01 = dataset1, train1
+    # Combine backend + hostname: local + gpu-01 = dataset1, train1, aliases
     results = scan_experiments(backend="local", hostname="gpu-01")
-    assert len(results) == 2
+    assert len(results) == 4
     for exp in results:
         assert exp.backend == "local"
         assert exp.hostname == "gpu-01"
@@ -615,10 +694,10 @@ def test_get_experiment_dag_populated(populated_gren_root: Path) -> None:
     """Test DAG with the populated fixture data."""
     dag = get_experiment_dag()
 
-    # Fixture has: PrepareDataset (2), TrainModel (2), EvalModel (1), DataLoader (1)
+    # Fixture has: PrepareDataset (3), TrainModel (2), EvalModel (1), DataLoader (1)
     # Classes: PrepareDataset, TrainModel, EvalModel, DataLoader = 4 nodes
     assert dag.total_nodes == 4
-    assert dag.total_experiments == 6
+    assert dag.total_experiments == 7
 
     # Check node counts
     node_by_class = {n.class_name: n for n in dag.nodes}
@@ -627,8 +706,8 @@ def test_get_experiment_dag_populated(populated_gren_root: Path) -> None:
     assert "EvalModel" in node_by_class
     assert "DataLoader" in node_by_class
 
-    # PrepareDataset has 2 experiments
-    assert node_by_class["PrepareDataset"].total_count == 2
+    # PrepareDataset has 3 experiments
+    assert node_by_class["PrepareDataset"].total_count == 3
     # TrainModel has 2 experiments
     assert node_by_class["TrainModel"].total_count == 2
     # EvalModel has 1 experiment

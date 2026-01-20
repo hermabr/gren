@@ -18,6 +18,7 @@ from .errors import (
     GrenComputeError,
     GrenError,
     GrenLockNotAcquired,
+    GrenMigrationRequired,
     GrenWaitTimeout,
     MISSING,
 )
@@ -31,6 +32,15 @@ from .runtime import (
     log,
     write_separator,
 )
+from .migrate import migrate
+from .migration import (
+    NamespacePair,
+    MigrationCandidate,
+    MigrationSkip,
+    apply_migration,
+    find_migration_candidates,
+    find_migration_candidates_initialized_target,
+)
 from .serialization import GrenSerializer
 from .storage import MetadataManager, StateManager
 
@@ -43,9 +53,17 @@ __all__ = [
     "GrenError",
     "GrenList",
     "GrenLockNotAcquired",
+    "GrenMigrationRequired",
     "GrenSerializer",
     "GrenWaitTimeout",
     "MISSING",
+    "migrate",
+    "NamespacePair",
+    "MigrationCandidate",
+    "MigrationSkip",
+    "apply_migration",
+    "find_migration_candidates",
+    "find_migration_candidates_initialized_target",
     "MetadataManager",
     "StateManager",
     "SubmititAdapter",

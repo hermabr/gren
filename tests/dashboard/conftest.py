@@ -30,7 +30,13 @@ from fastapi.testclient import TestClient
 from gren.config import GREN_CONFIG
 from gren.dashboard.main import app
 from gren.serialization import GrenSerializer
-from gren.storage import MetadataManager, StateManager
+from gren.storage import (
+    MetadataManager,
+    MigrationManager,
+    MigrationRecord,
+    StateManager,
+)
+from gren.storage.state import _StateResultMigrated, _StateResultSuccess
 
 from .pipelines import (
     DataLoader,
@@ -221,6 +227,7 @@ def _create_populated_experiments(root: Path) -> None:
     - EvalModel that depends on TrainModel (failed, local, gpu-02, alice, 2025-01-04)
     - DataLoader in different namespace (success, submitit, gpu-01, bob, 2024-06-01)
     - PrepareDataset with different params (absent, no attempt)
+    - PrepareDataset alias (migrated alias pointing to dataset1)
     """
     # Create a base dataset (successful, local, gpu-01, alice, early 2025)
     dataset1 = PrepareDataset(name="mnist", version="v1")
@@ -290,6 +297,103 @@ def _create_populated_experiments(root: Path) -> None:
     # Create another dataset with absent status (no attempt)
     dataset2 = PrepareDataset(name="cifar", version="v2")
     create_experiment_from_gren(dataset2, result_status="absent", attempt_status=None)
+
+    def set_alias_state(state) -> None:
+        state.result = _StateResultMigrated(status="migrated")
+        state.attempt = None
+
+    # Create an alias dataset that points back to dataset1
+    dataset_alias = PrepareDataset(name="mnist", version="v2")
+    alias_dir = dataset_alias.gren_dir
+    alias_dir.mkdir(parents=True, exist_ok=True)
+    MetadataManager.write_metadata(
+        MetadataManager.create_metadata(dataset_alias, alias_dir, ignore_diff=True),
+        alias_dir,
+    )
+
+    StateManager.update_state(alias_dir, set_alias_state)
+    alias_record = MigrationRecord(
+        kind="alias",
+        policy="alias",
+        from_namespace="dashboard.pipelines.PrepareDataset",
+        from_hash=GrenSerializer.compute_hash(dataset1),
+        from_root="data",
+        to_namespace="dashboard.pipelines.PrepareDataset",
+        to_hash=GrenSerializer.compute_hash(dataset_alias),
+        to_root="data",
+        migrated_at="2025-01-05T10:00:00+00:00",
+        overwritten_at=None,
+        default_values={"language": "spanish"},
+        origin="tests",
+        note="alias fixture",
+    )
+    MigrationManager.write_migration(alias_record, alias_dir)
+
+    dataset_alias_second = PrepareDataset(name="mnist", version="v4")
+    alias_second_dir = dataset_alias_second.gren_dir
+    alias_second_dir.mkdir(parents=True, exist_ok=True)
+    MetadataManager.write_metadata(
+        MetadataManager.create_metadata(
+            dataset_alias_second,
+            alias_second_dir,
+            ignore_diff=True,
+        ),
+        alias_second_dir,
+    )
+    StateManager.update_state(alias_second_dir, set_alias_state)
+    alias_second_record = MigrationRecord(
+        kind="alias",
+        policy="alias",
+        from_namespace="dashboard.pipelines.PrepareDataset",
+        from_hash=GrenSerializer.compute_hash(dataset1),
+        from_root="data",
+        to_namespace="dashboard.pipelines.PrepareDataset",
+        to_hash=GrenSerializer.compute_hash(dataset_alias_second),
+        to_root="data",
+        migrated_at="2025-01-05T12:00:00+00:00",
+        overwritten_at=None,
+        default_values={"language": "french"},
+        origin="tests",
+        note="alias fixture 2",
+    )
+    MigrationManager.write_migration(alias_second_record, alias_second_dir)
+
+    # Add a moved dataset entry for filter tests
+    moved_dataset = PrepareDataset(name="mnist", version="v3")
+    moved_dir = moved_dataset.gren_dir
+    moved_dir.mkdir(parents=True, exist_ok=True)
+    MetadataManager.write_metadata(
+        MetadataManager.create_metadata(moved_dataset, moved_dir, ignore_diff=True),
+        moved_dir,
+    )
+    StateManager.update_state(moved_dir, set_alias_state)
+
+    def set_success(state) -> None:
+        state.result = _StateResultSuccess(
+            status="success", created_at="2025-01-06T10:00:00+00:00"
+        )
+        state.attempt = None
+
+    StateManager.update_state(
+        dataset2._base_gren_dir(),
+        set_success,
+    )
+    moved_record = MigrationRecord(
+        kind="moved",
+        policy="move",
+        from_namespace="dashboard.pipelines.PrepareDataset",
+        from_hash=GrenSerializer.compute_hash(dataset2),
+        from_root="data",
+        to_namespace="dashboard.pipelines.PrepareDataset",
+        to_hash=GrenSerializer.compute_hash(moved_dataset),
+        to_root="data",
+        migrated_at="2025-01-06T10:00:00+00:00",
+        overwritten_at=None,
+        default_values=None,
+        origin="tests",
+        note="move fixture",
+    )
+    MigrationManager.write_migration(moved_record, moved_dir)
 
 
 @pytest.fixture(scope="module")

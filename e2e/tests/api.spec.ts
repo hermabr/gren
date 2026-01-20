@@ -21,8 +21,8 @@ test.describe("API Endpoints", () => {
     expect(Array.isArray(data.experiments)).toBe(true);
     expect(typeof data.total).toBe("number");
 
-    // Should have 10 experiments from our generated data
-    expect(data.total).toBe(10);
+    // Should have 14 experiments from our generated data
+    expect(data.total).toBe(14);
   });
 
   test("experiments endpoint supports filtering by result status", async ({
@@ -35,13 +35,34 @@ test.describe("API Endpoints", () => {
 
     const data = await response.json();
     expect(data.experiments).toBeDefined();
-    // Should have 6 successful experiments
-    expect(data.total).toBe(6);
+    // Should have 8 successful experiments
+    expect(data.total).toBe(8);
 
     // All returned experiments should be successful
     for (const exp of data.experiments) {
       expect(exp.result_status).toBe("success");
     }
+  });
+
+  test("experiments endpoint supports migrated filter", async ({ request }) => {
+    const response = await request.get(
+      "/api/experiments?result_status=migrated"
+    );
+    expect(response.ok()).toBeTruthy();
+
+    const data = await response.json();
+    expect(data.experiments).toBeDefined();
+    expect(data.total).toBe(2);
+
+    const kinds = data.experiments.map((exp) => exp.migration_kind);
+    expect(kinds).toContain("alias");
+
+    const aliasDetailResponse = await request.get(
+      `/api/experiments/${data.experiments[0].namespace}/${data.experiments[0].gren_hash}`
+    );
+    expect(aliasDetailResponse.ok()).toBeTruthy();
+    const aliasDetail = await aliasDetailResponse.json();
+    expect(Array.isArray(aliasDetail.alias_hashes)).toBe(false);
   });
 
   test("experiments endpoint supports filtering by attempt status", async ({
@@ -65,7 +86,7 @@ test.describe("API Endpoints", () => {
 
     const data = await response.json();
     expect(data.experiments.length).toBeLessThanOrEqual(3);
-    expect(data.total).toBe(10); // Total count should still be 10
+    expect(data.total).toBe(14); // Total count should still be 14
 
     // Get second page
     const response2 = await request.get("/api/experiments?limit=3&offset=3");
@@ -93,8 +114,8 @@ test.describe("API Endpoints", () => {
     expect(Array.isArray(data.by_result_status)).toBe(true);
 
     // Verify counts match our generated data
-    expect(data.total).toBe(10);
-    expect(data.success_count).toBe(6);
+    expect(data.total).toBe(14);
+    expect(data.success_count).toBe(8);
     expect(data.running_count).toBe(1);
     expect(data.failed_count).toBe(1);
     expect(data.queued_count).toBe(1);

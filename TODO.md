@@ -14,6 +14,16 @@
 - [ ] support doing time machine to go back to the state at the time an artifact was created
 - [ ] check how to make implicit dependencies (probably this is doable with chz?)
 - [ ] add a flag which makes one item always rerun, such as HULDRA_ALWAYS_RERUN="mypkg.my_file.MyObject"
+- [ ] Add support for lazily computing dependencies (maybe)
+- [ ] Change the version controlled flow so that it is always saved in the current folder at the same level as the pyproject.toml if that exists and in .gitignore if that exists and if not it throws. This should happen even if the general gren directory is somewhere else. It should save it to something like gren-data/artifacts or a better similar name. It should be possible to override this with an env variable.
+- [ ] When waiting, say how long you will be waiting and how long since file was touched
+- [ ] Sometimes it gets stuck in waiting for compute lock forever
+- [ ] Rename to furu
+- [ ] Add terminal dashboard (tui)
+- [ ] Don't allow `<locals>` in `__qualname__` if not providing env flag
+- [ ] Verify that all tests including e2e and dashboard tests are using tmp directory for gren root data dir
+- [ ] The mask dashboard-dev should populate dummy data
+- [ ] Better and more complex filtering
 
 ## Code Quality
 
@@ -33,6 +43,7 @@
 - [ ] Orphan detection - Find artifacts no longer referenced by code
 - [ ] Cache miss explanation - "This will recompute because field X changed"
 - [ ] Hash diff tool - Show which fields differ between two experiments
+- [ ] Have a def _dependencies(self) -> list[type[Gren]] which returns all the dependencies of the experiment that i don't want to define as fields
 
 ## Execution & Compute
 

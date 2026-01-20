@@ -41,9 +41,9 @@ def test_list_experiments(client: TestClient, populated_gren_root: Path) -> None
     response = client.get("/api/experiments")
     assert response.status_code == 200
     data = response.json()
-    # 6 experiments: dataset1, dataset2, train1, train2, eval1, loader
-    assert data["total"] == 6
-    assert len(data["experiments"]) == 6
+    # 9 experiments: dataset1, dataset2, train1, train2, eval1, loader, alias, alias2, moved
+    assert data["total"] == 9
+    assert len(data["experiments"]) == 9
 
     # Check structure of returned experiments
     exp = data["experiments"][0]
@@ -51,6 +51,11 @@ def test_list_experiments(client: TestClient, populated_gren_root: Path) -> None
     assert "gren_hash" in exp
     assert "class_name" in exp
     assert "result_status" in exp
+
+    response_original = client.get("/api/experiments?view=original")
+    assert response_original.status_code == 200
+    original_data = response_original.json()
+    assert original_data["total"] == 7
 
 
 def test_list_experiments_filter_by_result_status(
@@ -60,10 +65,33 @@ def test_list_experiments_filter_by_result_status(
     response = client.get("/api/experiments?result_status=success")
     assert response.status_code == 200
     data = response.json()
-    # 3 successful: dataset1, train1, loader
-    assert data["total"] == 3
+    # 4 successful: dataset1, train1, loader, dataset2 (moved source marked success)
+    assert data["total"] == 4
     for exp in data["experiments"]:
         assert exp["result_status"] == "success"
+
+    migrated = client.get("/api/experiments?result_status=migrated")
+    assert migrated.status_code == 200
+    migrated_data = migrated.json()
+    assert migrated_data["total"] == 3
+    assert {exp["migration_kind"] for exp in migrated_data["experiments"]} == {
+        "alias",
+        "moved",
+    }
+
+    moved = client.get("/api/experiments?result_status=migrated&migration_kind=moved")
+    assert moved.status_code == 200
+    moved_data = moved.json()
+    assert moved_data["total"] == 1
+    assert moved_data["experiments"][0]["migration_kind"] == "moved"
+
+    alias_policy = client.get(
+        "/api/experiments?result_status=migrated&migration_policy=alias"
+    )
+    assert alias_policy.status_code == 200
+    alias_data = alias_policy.json()
+    assert alias_data["total"] == 2
+    assert all(exp["migration_policy"] == "alias" for exp in alias_data["experiments"])
 
 
 def test_list_experiments_filter_by_attempt_status(
@@ -84,10 +112,17 @@ def test_list_experiments_filter_by_namespace(
     response = client.get("/api/experiments?namespace=dashboard.pipelines")
     assert response.status_code == 200
     data = response.json()
-    # All 6 experiments are in dashboard.pipelines
-    assert data["total"] == 6
+    # All 9 experiments are in dashboard.pipelines
+    assert data["total"] == 9
     for exp in data["experiments"]:
         assert exp["namespace"].startswith("dashboard.pipelines")
+
+    original_view = client.get(
+        "/api/experiments?namespace=dashboard.pipelines&view=original"
+    )
+    assert original_view.status_code == 200
+    data = original_view.json()
+    assert data["total"] == 7
 
 
 def test_list_experiments_filter_by_class(
@@ -110,13 +145,13 @@ def test_list_experiments_pagination(
     response = client.get("/api/experiments?limit=2&offset=0")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 6
+    assert data["total"] == 9
     assert len(data["experiments"]) == 2
 
     response = client.get("/api/experiments?limit=2&offset=2")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 6
+    assert data["total"] == 9
     assert len(data["experiments"]) == 2
 
 
@@ -141,6 +176,20 @@ def test_get_experiment_detail(client: TestClient, populated_gren_root: Path) ->
     assert "state" in data
     assert "metadata" in data
 
+    alias = PrepareDataset(name="mnist", version="v2")
+    alias_hash = GrenSerializer.compute_hash(alias)
+    alias_response = client.get(
+        f"/api/experiments/dashboard.pipelines.PrepareDataset/{alias_hash}?view=resolved"
+    )
+    assert alias_response.status_code == 200
+    alias_data = alias_response.json()
+    assert alias_data["migration_kind"] == "alias"
+    assert alias_data["original_result_status"] == "success"
+    assert alias_data["alias_hashes"] is None
+
+    assert data["alias_hashes"] is not None
+    assert len(data["alias_hashes"]) == 2
+
 
 def test_get_experiment_detail_with_attempt(
     client: TestClient, populated_gren_root: Path
@@ -161,6 +210,11 @@ def test_get_experiment_detail_with_attempt(
     assert data["attempt"] is not None
     assert data["attempt"]["status"] == "running"
     assert data["attempt"]["owner"]["host"] == "gpu-02"
+
+    response_original = client.get(
+        f"/api/experiments/dashboard.pipelines.TrainModel/{gren_hash}?view=original"
+    )
+    assert response_original.status_code == 200
 
 
 def test_get_experiment_not_found(
@@ -190,19 +244,21 @@ def test_dashboard_stats(client: TestClient, populated_gren_root: Path) -> None:
     assert response.status_code == 200
     data = response.json()
 
-    # 6 total: dataset1(success), train1(success), train2(running),
-    #          eval1(failed), loader(success), dataset2(absent)
-    assert data["total"] == 6
-    assert data["success_count"] == 3
+    # 9 total: dataset1(success), train1(success), train2(running),
+    #          eval1(failed), loader(success), dataset2(success moved source),
+    #          alias(migrated), alias2(migrated), moved(migrated)
+    assert data["total"] == 9
+    assert data["success_count"] == 4
     assert data["failed_count"] == 1
     assert data["running_count"] == 1
 
     # Check by_result_status
     result_statuses = {s["status"]: s["count"] for s in data["by_result_status"]}
-    assert result_statuses.get("success", 0) == 3
+    assert result_statuses.get("success", 0) == 4
     assert result_statuses.get("failed", 0) == 1
     assert result_statuses.get("incomplete", 0) == 1
-    assert result_statuses.get("absent", 0) == 1
+    assert result_statuses.get("absent", 0) == 0
+    assert result_statuses.get("migrated", 0) == 3
 
 
 def test_combined_filters(client: TestClient, populated_gren_root: Path) -> None:
@@ -212,8 +268,8 @@ def test_combined_filters(client: TestClient, populated_gren_root: Path) -> None
     )
     assert response.status_code == 200
     data = response.json()
-    # Only dataset1 matches (success + PrepareDataset namespace)
-    assert data["total"] == 1
+    # dataset1 + dataset2 (moved source marked success) match
+    assert data["total"] == 2
     assert data["experiments"][0]["result_status"] == "success"
     assert data["experiments"][0]["namespace"].startswith(
         "dashboard.pipelines.PrepareDataset"
@@ -249,7 +305,7 @@ def test_experiments_with_dependencies(
 # - train2: running, submitit, gpu-02, bob, 2025-01-03
 # - eval1: failed, local, gpu-02, alice, 2025-01-04
 # - loader: success, submitit, gpu-01, bob, 2024-06-01
-# - dataset2: absent, no attempt
+# - dataset2: success (moved source)
 # =============================================================================
 
 
@@ -257,11 +313,11 @@ def test_list_experiments_filter_by_backend(
     client: TestClient, populated_gren_root: Path
 ) -> None:
     """Test filtering experiments by backend via API."""
-    # Filter by local backend (dataset1, train1, eval1 = 3 experiments)
+    # Filter by local backend (dataset1, train1, eval1, aliases = 5 experiments)
     response = client.get("/api/experiments?backend=local")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 3
+    assert data["total"] == 5
     for exp in data["experiments"]:
         assert exp["backend"] == "local"
 
@@ -278,11 +334,11 @@ def test_list_experiments_filter_by_hostname(
     client: TestClient, populated_gren_root: Path
 ) -> None:
     """Test filtering experiments by hostname via API."""
-    # Filter by gpu-01 (dataset1, train1, loader = 3 experiments)
+    # Filter by gpu-01 (dataset1, train1, loader, aliases = 5 experiments)
     response = client.get("/api/experiments?hostname=gpu-01")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 3
+    assert data["total"] == 5
     for exp in data["experiments"]:
         assert exp["hostname"] == "gpu-01"
 
@@ -299,11 +355,11 @@ def test_list_experiments_filter_by_user(
     client: TestClient, populated_gren_root: Path
 ) -> None:
     """Test filtering experiments by user via API."""
-    # Filter by alice (dataset1, train1, eval1 = 3 experiments)
+    # Filter by alice (dataset1, train1, eval1, aliases = 5 experiments)
     response = client.get("/api/experiments?user=alice")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 3
+    assert data["total"] == 5
     for exp in data["experiments"]:
         assert exp["user"] == "alice"
 
@@ -343,12 +399,11 @@ def test_list_experiments_filter_by_updated_after(
     client: TestClient, populated_gren_root: Path
 ) -> None:
     """Test filtering experiments by updated_after via API."""
-    # Filter for experiments updated after 2025-01-03 (eval1 = 1)
+    # Filter for experiments updated after 2025-01-03 (eval1 + moved source + moved target)
     response = client.get("/api/experiments?updated_after=2025-01-03T12:00:00%2B00:00")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 1
-    assert data["experiments"][0]["updated_at"] == "2025-01-04T11:00:00+00:00"
+    assert data["total"] == 3
 
 
 def test_list_experiments_filter_by_updated_before(
@@ -367,8 +422,22 @@ def test_list_experiments_filter_by_config_filter(
     client: TestClient, populated_gren_root: Path
 ) -> None:
     """Test filtering experiments by config_filter via API."""
-    # Filter by config name=mnist (dataset1 only)
+    # Filter by config name=mnist (dataset1 + aliases + moved)
     response = client.get("/api/experiments?config_filter=name%3Dmnist")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 4
+    assert data["experiments"][0]["class_name"] == "PrepareDataset"
+
+    # Filter by config language=spanish (alias default)
+    response = client.get("/api/experiments?config_filter=language%3Dspanish")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["experiments"][0]["migration_kind"] == "alias"
+
+    # Filter by config name=cifar (dataset2 only)
+    response = client.get("/api/experiments?config_filter=name%3Dcifar")
     assert response.status_code == 200
     data = response.json()
     assert data["total"] == 1
@@ -385,17 +454,17 @@ def test_list_experiments_combined_new_filters(
     client: TestClient, populated_gren_root: Path
 ) -> None:
     """Test combining multiple new filters via API."""
-    # Combine backend=local + user=alice (dataset1, train1, eval1 = 3)
+    # Combine backend=local + user=alice (dataset1, train1, eval1, aliases = 5)
     response = client.get("/api/experiments?backend=local&user=alice")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 3
+    assert data["total"] == 5
 
-    # Combine backend=local + hostname=gpu-01 (dataset1, train1 = 2)
+    # Combine backend=local + hostname=gpu-01 (dataset1, train1, aliases = 4)
     response = client.get("/api/experiments?backend=local&hostname=gpu-01")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 2
+    assert data["total"] == 4
 
     # Combine backend=submitit + hostname=gpu-01 (loader = 1)
     response = client.get("/api/experiments?backend=submitit&hostname=gpu-01")
@@ -486,7 +555,7 @@ def test_dag_endpoint(client: TestClient, populated_gren_root: Path) -> None:
 
     # Fixture has 4 unique classes
     assert data["total_nodes"] == 4
-    assert data["total_experiments"] == 6
+    assert data["total_experiments"] == 7
 
     # Check node structure
     assert len(data["nodes"]) == 4
@@ -516,13 +585,13 @@ def test_dag_endpoint_node_counts(
     assert response.status_code == 200
     data = response.json()
 
-    # Find the PrepareDataset node (has 2 experiments: 1 success, 1 absent)
+    # Find the PrepareDataset node (has 3 experiments: 2 success, 1 migrated)
     prepare_node = next(
         (n for n in data["nodes"] if n["class_name"] == "PrepareDataset"), None
     )
     assert prepare_node is not None
-    assert prepare_node["total_count"] == 2
-    assert prepare_node["success_count"] == 1  # dataset1
+    assert prepare_node["total_count"] == 3
+    assert prepare_node["success_count"] == 2
 
     # Find the TrainModel node (has 2 experiments: 1 success, 1 running)
     train_node = next(
@@ -671,8 +740,12 @@ def test_relationships_endpoint_has_children(
     )
     assert list_response.status_code == 200
     experiments = list_response.json()["experiments"]
-    assert len(experiments) == 1
-    exp = experiments[0]
+    assert len(experiments) >= 1
+    exp = next(
+        experiment
+        for experiment in experiments
+        if experiment["result_status"] == "success"
+    )
 
     response = client.get(
         f"/api/experiments/{exp['namespace']}/{exp['gren_hash']}/relationships"
@@ -767,7 +840,11 @@ def test_relationships_child_structure(
     assert list_response.status_code == 200
     experiments = list_response.json()["experiments"]
     assert len(experiments) >= 1
-    exp = experiments[0]
+    exp = next(
+        experiment
+        for experiment in experiments
+        if experiment["result_status"] == "success"
+    )
 
     response = client.get(
         f"/api/experiments/{exp['namespace']}/{exp['gren_hash']}/relationships"

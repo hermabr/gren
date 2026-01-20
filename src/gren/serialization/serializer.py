@@ -102,12 +102,20 @@ class GrenSerializer:
                     **{
                         name: canonicalize(getattr(item, name))
                         for name in fields
-                        if not name.startswith("_")  # <--- Added filter
+                        if not name.startswith("_")
                     },
                 }
 
             if isinstance(item, dict):
-                return {k: canonicalize(v) for k, v in sorted(item.items())}
+                filtered = item
+                if cls.CLASS_MARKER in item:
+                    filtered = {
+                        k: v
+                        for k, v in item.items()
+                        if not (isinstance(k, str) and k.startswith("_"))
+                        or k == cls.CLASS_MARKER
+                    }
+                return {k: canonicalize(v) for k, v in sorted(filtered.items())}
 
             if isinstance(item, (list, tuple)):
                 return [canonicalize(v) for v in item]
@@ -161,10 +169,11 @@ class GrenSerializer:
 
             if chz.is_chz(item):
                 cls_path = cls.get_classname(item)
-                fields = [
-                    f"{name}={to_py_recursive(getattr(item, name), next_indent)}"
-                    for name in chz.chz_fields(item)
-                ]
+                fields = []
+                for name, field in chz.chz_fields(item).items():
+                    fields.append(
+                        f"{name}={to_py_recursive(getattr(item, name), next_indent)}"
+                    )
 
                 if multiline:
                     inner = (",\n" + " " * next_indent).join(fields)
