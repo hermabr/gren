@@ -48,9 +48,8 @@ const mockData = {
         attempt_number: 1,
         updated_at: "2025-01-01T12:00:00+00:00",
         started_at: "2025-01-01T11:00:00+00:00",
-    migration_kind: "moved",
-    migration_policy: "move",
-
+        migration_kind: "moved",
+        migration_policy: "move",
         migrated_at: "2025-01-02T00:00:00+00:00",
         overwritten_at: null,
         migration_origin: "tests",
@@ -82,7 +81,6 @@ const mockData = {
         to_hash: "abc123def456",
         original_result_status: "success",
       },
-
     ],
     total: 2,
   },
@@ -141,6 +139,8 @@ const mockData = {
     original_result_status: "success",
     original_namespace: "my_project.pipelines.TrainModel",
     original_hash: "orig123",
+    alias_namespaces: ["my_project.pipelines.TrainModel"],
+    alias_hashes: ["alias123"],
   },
   stats: {
     total: 10,

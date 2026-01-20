@@ -26,8 +26,8 @@ def test_scan_experiments_empty(temp_gren_root: Path) -> None:
 def test_scan_experiments_finds_all(populated_gren_root: Path) -> None:
     """Test that scanner finds all experiments."""
     experiments = scan_experiments()
-    # 8 experiments: dataset1, dataset2, train1, train2, eval1, loader, alias, moved
-    assert len(experiments) == 8
+    # 9 experiments: dataset1, dataset2, train1, train2, eval1, loader, alias, alias2, moved
+    assert len(experiments) == 9
 
 
 def test_scan_experiments_filter_result_status(populated_gren_root: Path) -> None:
@@ -39,7 +39,7 @@ def test_scan_experiments_filter_result_status(populated_gren_root: Path) -> Non
         assert exp.result_status == "success"
 
     migrated = scan_experiments(result_status="migrated")
-    assert len(migrated) == 2
+    assert len(migrated) == 3
     assert {exp.migration_kind for exp in migrated} == {"alias", "moved"}
 
     moved = scan_experiments(result_status="migrated", migration_kind="moved")
@@ -50,8 +50,8 @@ def test_scan_experiments_filter_result_status(populated_gren_root: Path) -> Non
         result_status="migrated",
         migration_policy="alias",
     )
-    assert len(alias_policy) == 1
-    assert alias_policy[0].migration_policy == "alias"
+    assert len(alias_policy) == 2
+    assert all(exp.migration_policy == "alias" for exp in alias_policy)
 
 
 def test_scan_experiments_applies_migration_defaults(
@@ -75,8 +75,8 @@ def test_scan_experiments_filter_attempt_status(populated_gren_root: Path) -> No
 def test_scan_experiments_filter_namespace(populated_gren_root: Path) -> None:
     """Test filtering by namespace prefix."""
     experiments = scan_experiments(namespace_prefix="dashboard.pipelines")
-    # All 8 experiments are in dashboard.pipelines
-    assert len(experiments) == 8
+    # All 9 experiments are in dashboard.pipelines
+    assert len(experiments) == 9
     for exp in experiments:
         assert exp.namespace.startswith("dashboard.pipelines")
 
@@ -136,6 +136,10 @@ def test_get_experiment_detail_found(populated_gren_root: Path) -> None:
     assert alias_detail is not None
     assert alias_detail.migration_kind == "alias"
     assert alias_detail.original_result_status == "success"
+    assert alias_detail.alias_hashes is None
+
+    assert detail.alias_hashes is not None
+    assert len(detail.alias_hashes) == 2
 
     alias_original = get_experiment_detail(
         "dashboard.pipelines.PrepareDataset", alias_hash, view="original"
@@ -174,10 +178,10 @@ def test_get_stats_empty(temp_gren_root: Path) -> None:
 def test_get_stats_counts(populated_gren_root: Path) -> None:
     """Test that stats correctly count experiments."""
     stats = get_stats()
-    # 8 total: dataset1(success), train1(success), train2(running),
+    # 9 total: dataset1(success), train1(success), train2(running),
     #          eval1(failed), loader(success), dataset2(success moved source),
-    #          alias(migrated), moved(migrated)
-    assert stats.total == 8
+    #          alias(migrated), alias2(migrated), moved(migrated)
+    assert stats.total == 9
     assert stats.success_count == 4
     assert stats.failed_count == 1
     assert stats.running_count == 1
@@ -188,7 +192,7 @@ def test_get_stats_counts(populated_gren_root: Path) -> None:
     assert result_map["failed"] == 1
     assert result_map["incomplete"] == 1
     assert result_map.get("absent", 0) == 0
-    assert result_map["migrated"] == 2
+    assert result_map["migrated"] == 3
 
 
 def test_scan_experiments_version_controlled(temp_gren_root: Path) -> None:
@@ -238,7 +242,7 @@ def test_scan_experiments_filter_by_backend(populated_gren_root: Path) -> None:
 
     # Filter by local backend
     local_results = scan_experiments(backend="local")
-    assert len(local_results) == 4  # dataset1, train1, eval1, alias
+    assert len(local_results) == 5  # dataset1, train1, eval1, aliases
     for exp in local_results:
         assert exp.backend == "local"
 
@@ -270,7 +274,7 @@ def test_scan_experiments_filter_by_hostname(populated_gren_root: Path) -> None:
 
     # Filter by gpu-01
     gpu01_results = scan_experiments(hostname="gpu-01")
-    assert len(gpu01_results) == 4  # dataset1, train1, loader, alias
+    assert len(gpu01_results) == 5  # dataset1, train1, loader, aliases
     for exp in gpu01_results:
         assert exp.hostname == "gpu-01"
 
@@ -302,7 +306,7 @@ def test_scan_experiments_filter_by_user(populated_gren_root: Path) -> None:
 
     # Filter by alice
     alice_results = scan_experiments(user="alice")
-    assert len(alice_results) == 4  # dataset1, train1, eval1, alias
+    assert len(alice_results) == 5  # dataset1, train1, eval1, aliases
     for exp in alice_results:
         assert exp.user == "alice"
 
@@ -334,7 +338,7 @@ def test_scan_experiments_filter_by_started_after(populated_gren_root: Path) -> 
 
     # Filter by started_after 2025-01-01 should exclude loader (2024) and dataset2 (no attempt)
     results = scan_experiments(started_after="2025-01-01T00:00:00+00:00")
-    assert len(results) == 5  # dataset1, train1, train2, eval1, alias
+    assert len(results) == 6  # dataset1, train1, train2, eval1, aliases
     for exp in results:
         assert exp.started_at is not None
         assert exp.started_at >= "2025-01-01T00:00:00+00:00"
@@ -372,9 +376,9 @@ def test_scan_experiments_filter_by_updated_after(populated_gren_root: Path) -> 
     # Fixture has: loader(updated 2024-06-01), dataset1(2025-01-01), train1(2025-01-02),
     #              train2(2025-01-03), eval1(2025-01-04), dataset2(no attempt with default date)
 
-    # Filter by updated_after 2025-01-02 should get train1, train2, eval1, alias, moved
+    # Filter by updated_after 2025-01-02 should get train1, train2, eval1, aliases
     results = scan_experiments(updated_after="2025-01-02T00:00:00+00:00")
-    assert len(results) == 5  # train1, train2, eval1, alias, moved
+    assert len(results) == 5  # train1, train2, eval1, aliases
     for exp in results:
         assert exp.updated_at is not None
         assert exp.updated_at >= "2025-01-02T00:00:00+00:00"
@@ -475,6 +479,7 @@ def test_scan_experiments_combined_filters(populated_gren_root: Path) -> None:
     # - loader: success, submitit, gpu-01, bob, 2024-06-01
     # - dataset2: success (moved source)
     # - alias: migrated (resolves to dataset1)
+    # - alias2: migrated (resolves to dataset1)
     # - moved: migrated (points to dataset2)
 
     # Combine result_status + user: success + alice = dataset1, train1
@@ -484,9 +489,9 @@ def test_scan_experiments_combined_filters(populated_gren_root: Path) -> None:
         assert exp.user == "alice"
         assert exp.result_status == "success"
 
-    # Combine backend + hostname: local + gpu-01 = dataset1, train1, alias
+    # Combine backend + hostname: local + gpu-01 = dataset1, train1, aliases
     results = scan_experiments(backend="local", hostname="gpu-01")
-    assert len(results) == 3
+    assert len(results) == 4
     for exp in results:
         assert exp.backend == "local"
         assert exp.hostname == "gpu-01"

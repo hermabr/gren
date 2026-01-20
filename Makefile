@@ -41,7 +41,7 @@ frontend-lint:
 	cd dashboard-frontend && bun run lint
 
 # Development
-dashboard-dev:
+dashboard-dev: frontend-build
 	@echo "Starting development servers..."
 	@make -j2 dashboard-dev-backend dashboard-dev-frontend
 

@@ -57,6 +57,8 @@ class ExperimentDetail(ExperimentSummary):
     attempt: StateAttempt | None = None
     original_namespace: str | None = None
     original_hash: str | None = None
+    alias_namespaces: list[str] | None = None
+    alias_hashes: list[str] | None = None
 
 
 class ExperimentList(BaseModel):

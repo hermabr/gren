@@ -16,8 +16,8 @@ test.describe("Experiments Page", () => {
     await expect(page.getByPlaceholder("Filter by namespace...")).toBeVisible();
     await expect(page.getByRole("combobox").first()).toBeVisible();
 
-    // Should have 13 experiments from generate_data.py
-    await expect(page.getByText(/Showing \d+ of 13 experiments/)).toBeVisible();
+    // Should have 14 experiments from generate_data.py
+    await expect(page.getByText(/Showing \d+ of 14 experiments/)).toBeVisible();
 
     // Check that experiment cards display real class names
     const experimentClasses = ["PrepareDataset", "TrainModel", "TrainTextModel"];
@@ -64,7 +64,8 @@ test.describe("Experiments Page", () => {
     await page.goto("/experiments");
     await expect(page.getByText(/Showing \d+ of \d+ experiments/)).toBeVisible();
 
-    await expect(page.locator("span", { hasText: "alias" })).toBeVisible();
+    const aliasBadges = page.locator("span", { hasText: "alias" });
+    await expect(aliasBadges).toHaveCount(2);
   });
 
   test("should show migration toggle and link on detail", async ({ page }) => {
@@ -80,6 +81,69 @@ test.describe("Experiments Page", () => {
 
     await page.getByRole("button", { name: "Original" }).click();
     await expect(page.getByText("Original status:")).toBeVisible();
+  });
+
+  test("should show alias links from original", async ({ page }) => {
+    await page.goto("/experiments");
+    await expect(page.getByText(/Showing \d+ of \d+ experiments/)).toBeVisible();
+
+    const aliasRow = page.locator("tr", { has: page.getByText("alias") }).first();
+    await aliasRow.locator("a").first().click();
+
+    const originalLink = page.getByRole("link", { name: "View original" });
+    await expect(originalLink).toBeVisible();
+    await originalLink.click();
+
+    await expect
+      .poll(async () => {
+        const response = await page.request.get(
+          "/api/experiments/my_project.pipelines.PrepareDataset/538934772119a51b05c3?view=resolved"
+        );
+        if (!response.ok()) {
+          return null;
+        }
+        return response.json();
+      })
+      .toMatchObject({
+        alias_hashes: [
+          "91e3f929e8cfee3288cf",
+          "c274e94e4acae91dd6b7",
+        ],
+      });
+
+    await page.waitForLoadState("networkidle");
+
+    await expect
+      .poll(async () => page.getByRole("link", { name: "View alias" }).count())
+      .toBe(2);
+
+    const aliasLinks = page.getByRole("link", { name: "View alias" });
+
+    await aliasLinks.first().click({ force: true });
+    await expect(page.getByRole("link", { name: "View original" })).toBeVisible();
+  });
+
+  test("moved detail shows original link", async ({ page }) => {
+    await page.goto("/experiments");
+    await expect(page.getByText(/Showing \d+ of \d+ experiments/)).toBeVisible();
+
+    const movedRow = page.locator("tr", { has: page.getByText("moved") }).first();
+    await movedRow.locator("a").first().click();
+
+    const originalLink = page.getByRole("link", { name: "View original" });
+    if ((await originalLink.count()) > 0) {
+      await expect(originalLink).toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole("button", { name: "Original" })).toBeVisible();
+      await page.getByRole("button", { name: "Original" }).click({ force: true });
+      return;
+    }
+
+    const originalButton = page.getByRole("button", { name: "Original" });
+    await expect(originalButton).toBeVisible();
+    if (await originalButton.isEnabled()) {
+      await originalButton.click({ force: true });
+      await expect(page.getByRole("link", { name: "View original" })).toBeVisible();
+    }
   });
 
   test("should handle empty results gracefully", async ({ page }) => {

@@ -1,6 +1,7 @@
 # Changelog
 
 ## v1.0.0
+- Show alias links for original experiments and enable original view for moved/copied records.
 - Update dashboard filtering tests for moved migration fixtures and status counts.
 - Add explicit migration alias tracking with overwrite logging and dashboard views for aliased vs original experiments.
 - Tighten initialized-target migration candidate filtering to avoid mismatched configs.
@@ -12,6 +13,7 @@
 - Update state migration handling to store migrated status in state.json and keep migration metadata in migration.json.
 - Add migration regression tests for rename/added-field alias cases plus recompute detach events.
 - Extend dashboard e2e fixtures/tests to cover migrated experiment tags and original/aliased navigation.
+- Ensure alias links are exposed in original experiment detail responses for UI navigation.
 - Warn when migrating experiments that are not in a success state.
 - Support migration default values for alias metadata (for adding fields with defaults).
 

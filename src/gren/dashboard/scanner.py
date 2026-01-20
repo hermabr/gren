@@ -48,6 +48,32 @@ def _parse_namespace_from_path(experiment_dir: Path, root: Path) -> tuple[str, s
     return namespace, gren_hash
 
 
+def _alias_key(migration: MigrationRecord) -> tuple[str, str, str]:
+    return (migration.from_namespace, migration.from_hash, migration.from_root)
+
+
+def _collect_aliases() -> dict[tuple[str, str, str], list[MigrationRecord]]:
+    aliases: dict[tuple[str, str, str], list[MigrationRecord]] = defaultdict(list)
+    for root in _iter_roots():
+        for experiment_dir in _find_experiment_dirs(root):
+            migration = MigrationManager.read_migration(experiment_dir)
+            if migration is None or migration.kind != "alias":
+                continue
+            aliases[_alias_key(migration)].append(migration)
+    return aliases
+
+
+def _alias_reference(
+    aliases: dict[tuple[str, str, str], list[MigrationRecord]],
+) -> dict[str, dict[str, list[str]]]:
+    ref: dict[str, dict[str, list[str]]] = {}
+    for key, records in aliases.items():
+        from_namespace, from_hash, _from_root = key
+        namespace_map = ref.setdefault(from_namespace, {})
+        namespace_map[from_hash] = [record.to_hash for record in records]
+    return ref
+
+
 def _get_class_name(namespace: str) -> str:
     """Extract class name from namespace (last component)."""
     parts = namespace.split(".")
@@ -405,6 +431,7 @@ def get_experiment_detail(
     """
     # Convert namespace to path
     namespace_path = Path(*namespace.split("."))
+    alias_reference = _alias_reference(_collect_aliases())
 
     for root in _iter_roots():
         experiment_dir = root / namespace_path / gren_hash
@@ -437,8 +464,37 @@ def get_experiment_detail(
                 gren_hash = original_hash
             else:
                 metadata = _read_metadata_with_defaults(original_dir, migration)
+        elif migration is not None and migration.kind in {
+            "moved",
+            "copied",
+            "migrated",
+        }:
+            if view == "original":
+                original_dir = MigrationManager.resolve_dir(migration, target="from")
+                state = StateManager.read_state(original_dir)
+                metadata = MetadataManager.read_metadata_raw(original_dir)
+                experiment_dir = original_dir
+                namespace = migration.from_namespace
+                gren_hash = migration.from_hash
+                original_namespace = migration.from_namespace
+                original_hash = migration.from_hash
 
         attempt = state.attempt
+        if view == "original" and migration is not None and migration.kind == "alias":
+            alias_source_namespace = migration.from_namespace
+            alias_source_hash = migration.from_hash
+        else:
+            alias_source_namespace = namespace
+            alias_source_hash = gren_hash
+
+        alias_keys = alias_reference.get(alias_source_namespace, {}).get(
+            alias_source_hash,
+            [],
+        )
+        alias_namespaces = (
+            [alias_source_namespace] * len(alias_keys) if alias_keys else None
+        )
+        alias_hashes = alias_keys if alias_keys else None
         return ExperimentDetail(
             namespace=namespace,
             gren_hash=gren_hash,
@@ -468,6 +524,8 @@ def get_experiment_detail(
             original_result_status=original_status,
             original_namespace=original_namespace,
             original_hash=original_hash,
+            alias_namespaces=alias_namespaces,
+            alias_hashes=alias_hashes,
         )
 
     return None

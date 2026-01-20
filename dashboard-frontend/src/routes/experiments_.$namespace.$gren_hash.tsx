@@ -473,14 +473,35 @@ function ExperimentDetailPage() {
 
   const isMigrated = Boolean(experiment?.migration_kind);
   const originalLink = useMemo(() => {
-    if (!experiment?.original_namespace || !experiment?.original_hash) {
-      return null;
+    if (experiment?.original_namespace && experiment?.original_hash) {
+      return {
+        namespace: experiment.original_namespace,
+        gren_hash: experiment.original_hash,
+      };
     }
-    return {
-      namespace: experiment.original_namespace,
-      gren_hash: experiment.original_hash,
-    };
-  }, [experiment?.original_namespace, experiment?.original_hash]);
+    if (experiment?.from_namespace && experiment?.from_hash) {
+      return {
+        namespace: experiment.from_namespace,
+        gren_hash: experiment.from_hash,
+      };
+    }
+    return null;
+  }, [
+    experiment?.original_namespace,
+    experiment?.original_hash,
+    experiment?.from_namespace,
+    experiment?.from_hash,
+  ]);
+
+  const aliasLinks = useMemo(() => {
+    if (!experiment?.alias_namespaces || !experiment?.alias_hashes) {
+      return [];
+    }
+    return experiment.alias_namespaces.map((aliasNamespace, index) => ({
+      namespace: aliasNamespace,
+      gren_hash: experiment.alias_hashes?.[index] ?? "",
+    }));
+  }, [experiment?.alias_namespaces, experiment?.alias_hashes]);
 
   if (isLoading) {
     return (
@@ -602,6 +623,31 @@ function ExperimentDetailPage() {
                   Original status: {experiment.original_result_status}
                 </span>
               ) : null}
+            </div>
+          )}
+          {aliasLinks.length > 0 && (
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <div className="rounded-full border border-muted px-3 py-1 text-muted-foreground">
+                Aliases: {aliasLinks.length}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {aliasLinks.map((aliasLink) => (
+                  <Button
+                    key={aliasLink.gren_hash}
+                    asChild
+                    size="sm"
+                    variant="ghost"
+                  >
+                    <Link
+                      to="/experiments/$namespace/$gren_hash"
+                      params={aliasLink}
+                      aria-label="View alias"
+                    >
+                      View alias
+                    </Link>
+                  </Button>
+                ))}
+              </div>
             </div>
           )}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
