@@ -114,20 +114,25 @@ class TrainTextModel(furu.Furu[str]):
 
 ### Storage Structure
 
+Furu uses two roots: `FURU_PATH` for `data/` + `raw/`, and
+`FURU_VERSION_CONTROLLED_PATH` for `artifacts/`. Defaults:
+
+```
+FURU_PATH=<project>/furu-data
+FURU_VERSION_CONTROLLED_PATH=<project>/furu-data/artifacts
+```
+
+`<project>` is the nearest directory containing `pyproject.toml` (falling back to
+the git root). This means you can move `FURU_PATH` without relocating artifacts.
+
 ```
 $FURU_PATH/
-├── data/                         # Default storage (version_controlled=False)
-│   └── <module>/<Class>/
-│       └── <hash>/
-│           ├── .furu/
-│           │   ├── metadata.json # Config, git info, environment
-│           │   ├── state.json    # Status and timestamps
-│           │   ├── furu.log    # Captured logs
-│           │   └── SUCCESS.json  # Marker file
-│           └── <your outputs>    # Files from _create()
-├── git/                          # For version_controlled=True
-│   └── <same structure>
-└── raw/                          # Shared directory for large files
+├── data/                         # version_controlled=False
+│   └── <module>/<Class>/<hash>/
+└── raw/
+
+$FURU_VERSION_CONTROLLED_PATH/    # version_controlled=True
+└── <module>/<Class>/<hash>/
 ```
 
 ## Features
@@ -241,9 +246,16 @@ For artifacts that should be stored separately (e.g., checked into git):
 
 ```python
 class VersionedConfig(furu.Furu[dict], version_controlled=True):
-    # Stored under $FURU_PATH/git/ instead of $FURU_PATH/data/
+    # Stored under $FURU_VERSION_CONTROLLED_PATH
+    # Default: <project>/furu-data/artifacts
     ...
 ```
+
+`<project>` is the nearest directory containing `pyproject.toml`, or the git root
+if `pyproject.toml` is missing.
+
+It is typical to keep `furu-data/data/` and `furu-data/raw/` in `.gitignore` while
+committing `furu-data/artifacts/`.
 
 ## Logging
 
@@ -379,7 +391,8 @@ The `/api/experiments` endpoint supports:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FURU_PATH` | `./data-furu/` | Base storage directory |
+| `FURU_PATH` | `<project>/furu-data` | Base storage directory for non-versioned artifacts |
+| `FURU_VERSION_CONTROLLED_PATH` | `<project>/furu-data/artifacts` | Override version-controlled storage root |
 | `FURU_LOG_LEVEL` | `INFO` | Console verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `FURU_IGNORE_DIFF` | `false` | Skip embedding git diff in metadata |
 | `FURU_ALWAYS_RERUN` | `""` | Comma-separated class qualnames to always rerun (use `ALL` to bypass cache globally; cannot combine with other entries; entries must be importable) |

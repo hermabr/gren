@@ -6,14 +6,19 @@ from pathlib import Path
 class FuruConfig:
     """Central configuration for Furu behavior."""
 
+    DEFAULT_ROOT_DIR = Path("furu-data")
+    VERSION_CONTROLLED_SUBDIR = DEFAULT_ROOT_DIR / "artifacts"
+
     def __init__(self):
         def _get_base_root() -> Path:
             env = os.getenv("FURU_PATH")
             if env:
                 return Path(env).expanduser().resolve()
-            return Path("data-furu").resolve()
+            project_root = self._find_project_root(fallback_to_cwd=True)
+            return (project_root / self.DEFAULT_ROOT_DIR).resolve()
 
         self.base_root = _get_base_root()
+        self.version_controlled_root_override = self._get_version_controlled_override()
         self.poll_interval = float(os.getenv("FURU_POLL_INTERVAL_SECS", "10"))
         self.wait_log_every_sec = float(os.getenv("FURU_WAIT_LOG_EVERY_SECS", "10"))
         self.stale_timeout = float(os.getenv("FURU_STALE_AFTER_SECS", str(30 * 60)))
@@ -90,10 +95,44 @@ class FuruConfig:
         return num * multipliers[unit]
 
     def get_root(self, version_controlled: bool = False) -> Path:
-        """Get root directory for storage (version_controlled determines subdirectory)."""
+        """Get root directory for storage (version_controlled uses its own root)."""
         if version_controlled:
-            return self.base_root / "git"
+            if self.version_controlled_root_override is not None:
+                return self.version_controlled_root_override
+            return self._resolve_version_controlled_root()
         return self.base_root / "data"
+
+    @classmethod
+    def _get_version_controlled_override(cls) -> Path | None:
+        env = os.getenv("FURU_VERSION_CONTROLLED_PATH")
+        if env:
+            return Path(env).expanduser().resolve()
+        return None
+
+    @classmethod
+    def _resolve_version_controlled_root(cls) -> Path:
+        project_root = cls._find_project_root()
+        return (project_root / cls.VERSION_CONTROLLED_SUBDIR).resolve()
+
+    @staticmethod
+    def _find_project_root(
+        start: Path | None = None, *, fallback_to_cwd: bool = False
+    ) -> Path:
+        base = (start or Path.cwd()).resolve()
+        git_root: Path | None = None
+        for path in (base, *base.parents):
+            if (path / "pyproject.toml").is_file():
+                return path
+            if git_root is None and (path / ".git").exists():
+                git_root = path
+        if git_root is not None:
+            return git_root
+        if fallback_to_cwd:
+            return base
+        raise ValueError(
+            "Cannot locate pyproject.toml or .git to determine version-controlled root. "
+            "Set FURU_VERSION_CONTROLLED_PATH to override."
+        )
 
     @staticmethod
     def _require_namespaces_exist(namespaces: set[str]) -> None:

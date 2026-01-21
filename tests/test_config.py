@@ -6,11 +6,102 @@ from furu.config import FuruConfig
 
 def test_get_and_set_furu_root(furu_tmp_root, tmp_path) -> None:
     assert furu.get_furu_root(version_controlled=False) == furu_tmp_root / "data"
-    assert furu.get_furu_root(version_controlled=True) == furu_tmp_root / "git"
+    assert furu.get_furu_root(version_controlled=True) == (
+        furu_tmp_root / "furu-data" / "artifacts"
+    )
     assert furu.FURU_CONFIG.raw_dir == furu_tmp_root / "raw"
 
     furu.set_furu_root(tmp_path)
     assert furu.FURU_CONFIG.base_root == tmp_path.resolve()
+
+
+def test_default_base_root_uses_pyproject(tmp_path, monkeypatch) -> None:
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+
+    monkeypatch.chdir(project_root)
+    monkeypatch.delenv("FURU_PATH", raising=False)
+
+    config = FuruConfig()
+
+    assert config.base_root == project_root / "furu-data"
+
+
+def test_default_base_root_uses_git_root(tmp_path, monkeypatch) -> None:
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+    (project_root / ".git").mkdir()
+
+    monkeypatch.chdir(project_root)
+    monkeypatch.delenv("FURU_PATH", raising=False)
+
+    config = FuruConfig()
+
+    assert config.base_root == project_root / "furu-data"
+
+
+def test_default_base_root_falls_back_to_cwd(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FURU_PATH", raising=False)
+
+    config = FuruConfig()
+
+    assert config.base_root == tmp_path / "furu-data"
+
+
+def test_version_controlled_root_defaults_to_pyproject(tmp_path, monkeypatch) -> None:
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+    gitignore = project_root / ".gitignore"
+    gitignore.write_text("# ignore\n")
+    original_gitignore = gitignore.read_text()
+
+    monkeypatch.chdir(project_root)
+    monkeypatch.delenv("FURU_VERSION_CONTROLLED_PATH", raising=False)
+    config = FuruConfig()
+
+    root = config.get_root(version_controlled=True)
+    assert root == project_root / "furu-data" / "artifacts"
+    assert gitignore.read_text() == original_gitignore
+
+
+def test_version_controlled_root_uses_git_root(tmp_path, monkeypatch) -> None:
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+    (project_root / ".git").mkdir()
+
+    monkeypatch.chdir(project_root)
+    monkeypatch.delenv("FURU_VERSION_CONTROLLED_PATH", raising=False)
+
+    config = FuruConfig()
+
+    root = config.get_root(version_controlled=True)
+    assert root == project_root / "furu-data" / "artifacts"
+
+
+def test_version_controlled_root_missing_gitignore_ok(tmp_path, monkeypatch) -> None:
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+
+    monkeypatch.chdir(project_root)
+    monkeypatch.delenv("FURU_VERSION_CONTROLLED_PATH", raising=False)
+    config = FuruConfig()
+
+    root = config.get_root(version_controlled=True)
+    assert root == project_root / "furu-data" / "artifacts"
+
+
+def test_version_controlled_root_override(tmp_path, monkeypatch) -> None:
+    override_root = tmp_path / "override"
+    monkeypatch.setenv("FURU_VERSION_CONTROLLED_PATH", str(override_root))
+    monkeypatch.chdir(tmp_path)
+
+    config = FuruConfig()
+
+    assert config.get_root(version_controlled=True) == override_root.resolve()
 
 
 def test_always_rerun_from_env(monkeypatch) -> None:

@@ -16,6 +16,11 @@ def furu_tmp_root(tmp_path, monkeypatch):
     import furu
 
     monkeypatch.setattr(furu.FURU_CONFIG, "base_root", tmp_path)
+    monkeypatch.setattr(
+        furu.FURU_CONFIG,
+        "version_controlled_root_override",
+        tmp_path / "furu-data" / "artifacts",
+    )
     monkeypatch.setattr(furu.FURU_CONFIG, "ignore_git_diff", True)
     monkeypatch.setattr(furu.FURU_CONFIG, "poll_interval", 0.01)
     monkeypatch.setattr(furu.FURU_CONFIG, "stale_timeout", 0.1)
