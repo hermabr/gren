@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add dependency discovery via `_dependencies()` and `_get_dependencies()` with recursive traversal and de-duplication, plus `DependencySpec`/`DependencyChzSpec` typing helpers.
+- Include direct dependencies in `Furu` hashing to invalidate caches when implicit dependencies change.
+
 ## v0.0.2
 
 - Auto-generate dashboard dev dummy data in a temporary Furu root (override with `FURU_DASHBOARD_DEV_DATA_DIR`).
