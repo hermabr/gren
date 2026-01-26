@@ -9,12 +9,11 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Callable, Literal, Mapping, TypedDict, TypeAlias
+from typing import Annotated, Any, Callable, Literal, Mapping, TypeAlias, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ..errors import FuruLockNotAcquired, FuruWaitTimeout
-
 
 # Type alias for scheduler-specific metadata. Different schedulers (SLURM, LSF, PBS, local)
 # return different fields, so this must remain dynamic.
@@ -685,36 +684,6 @@ class StateManager:
     def heartbeat(cls, directory: Path) -> None:
         lock_path = cls.get_lock_path(directory, cls.COMPUTE_LOCK)
         os.utime(lock_path)
-
-    @classmethod
-    def set_attempt_fields(
-        cls, directory: Path, *, attempt_id: str, fields: SchedulerMetadata
-    ) -> bool:
-        ok = False
-
-        def mutate(state: _FuruState) -> bool:
-            nonlocal ok
-            attempt = state.attempt
-            if attempt is None or attempt.id != attempt_id:
-                return False
-            changed = False
-            for key, value in fields.items():
-                if key == "scheduler" and isinstance(value, dict):
-                    for scheduler_key, scheduler_value in value.items():
-                        if attempt.scheduler.get(scheduler_key) != scheduler_value:
-                            attempt.scheduler[scheduler_key] = scheduler_value
-                            changed = True
-                    continue
-                if hasattr(attempt, key):
-                    current_value = getattr(attempt, key)
-                    if current_value != value:
-                        setattr(attempt, key, value)
-                        changed = True
-            ok = changed
-            return changed
-
-        cls.update_state(directory, mutate)
-        return ok
 
     @classmethod
     def finish_attempt_success(cls, directory: Path, *, attempt_id: str) -> None:
