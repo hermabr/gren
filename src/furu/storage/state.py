@@ -283,9 +283,9 @@ class StateManager:
     EVENTS_FILE = "events.jsonl"
     SUCCESS_MARKER = "SUCCESS.json"
 
-    COMPUTE_LOCK = ".compute.lock"
-    SUBMIT_LOCK = ".submit.lock"
-    STATE_LOCK = ".state.lock"
+    COMPUTE_LOCK = "compute.lock"
+    SUBMIT_LOCK = "submit.lock"
+    STATE_LOCK = "state.lock"
 
     TERMINAL_STATUSES = {
         "success",

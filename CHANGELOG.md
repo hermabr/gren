@@ -7,6 +7,7 @@
 - Include caller locations for get/dependency logs (including `furu.log` call sites).
 - Create each artifact `.furu` directory once during computation setup to avoid repeated mkdirs.
 - Skip `state.json` rewrites for no-op state updates (including heartbeat mismatches).
+- Use non-hidden lock filenames inside `.furu` (`compute.lock`, `submit.lock`, `state.lock`).
 
 ## v0.0.4
 
