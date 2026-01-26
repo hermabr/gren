@@ -189,7 +189,6 @@ def create_experiment_from_furu(
             "backend": backend,
             "status": attempt_status,
             "started_at": started_at,
-            "heartbeat_at": started_at,
             "lease_duration_sec": 120.0,
             "lease_expires_at": "2025-01-01T13:00:00+00:00",
             "owner": {

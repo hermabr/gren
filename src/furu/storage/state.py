@@ -167,7 +167,6 @@ class _StateAttemptBase(BaseModel):
     number: int = 1
     backend: str
     started_at: str
-    heartbeat_at: str
     lease_duration_sec: float
     lease_expires_at: str
     owner: StateOwner
@@ -228,7 +227,6 @@ class StateAttempt(BaseModel):
     backend: str
     status: str
     started_at: str
-    heartbeat_at: str
     lease_duration_sec: float
     lease_expires_at: str
     owner: StateOwner
@@ -246,7 +244,6 @@ class StateAttempt(BaseModel):
             backend=attempt.backend,
             status=attempt.status,
             started_at=attempt.started_at,
-            heartbeat_at=attempt.heartbeat_at,
             lease_duration_sec=attempt.lease_duration_sec,
             lease_expires_at=attempt.lease_expires_at,
             owner=attempt.owner,
@@ -543,6 +540,26 @@ class StateManager:
         return cls._utcnow() >= expires
 
     @classmethod
+    def last_heartbeat_mtime(cls, directory: Path) -> float | None:
+        lock_path = cls.get_lock_path(directory, cls.COMPUTE_LOCK)
+        try:
+            return lock_path.stat().st_mtime
+        except FileNotFoundError:
+            return None
+
+    @classmethod
+    def _running_heartbeat_reason(
+        cls, directory: Path, attempt: _StateAttemptRunning
+    ) -> str | None:
+        last_heartbeat = cls.last_heartbeat_mtime(directory)
+        if last_heartbeat is None:
+            return "missing_heartbeat"
+        expires_at = last_heartbeat + float(attempt.lease_duration_sec)
+        if time.time() >= expires_at:
+            return "lease_expired"
+        return None
+
+    @classmethod
     def start_attempt_queued(
         cls,
         directory: Path,
@@ -610,7 +627,6 @@ class StateManager:
 
             owner_state = StateOwner.model_validate(owner)
             started_at = now.isoformat(timespec="seconds")
-            heartbeat_at = started_at
             lease_duration = float(lease_duration_sec)
             lease_expires_at = expires.isoformat(timespec="seconds")
             scheduler_state: SchedulerMetadata = scheduler or {}
@@ -620,7 +636,6 @@ class StateManager:
                 number=int(number),
                 backend=backend,
                 started_at=started_at,
-                heartbeat_at=heartbeat_at,
                 lease_duration_sec=lease_duration,
                 lease_expires_at=lease_expires_at,
                 owner=owner_state,
@@ -667,28 +682,9 @@ class StateManager:
         return attempt.id
 
     @classmethod
-    def heartbeat(
-        cls, directory: Path, *, attempt_id: str, lease_duration_sec: float
-    ) -> bool:
-        ok = False
-
-        def mutate(state: _FuruState) -> bool:
-            nonlocal ok
-            attempt = state.attempt
-            if not isinstance(attempt, _StateAttemptRunning):
-                return False
-            if attempt.id != attempt_id:
-                return False
-            now = cls._utcnow()
-            expires = now + _dt.timedelta(seconds=float(lease_duration_sec))
-            attempt.heartbeat_at = now.isoformat(timespec="seconds")
-            attempt.lease_duration_sec = float(lease_duration_sec)
-            attempt.lease_expires_at = expires.isoformat(timespec="seconds")
-            ok = True
-            return True
-
-        cls.update_state(directory, mutate)
-        return ok
+    def heartbeat(cls, directory: Path) -> None:
+        lock_path = cls.get_lock_path(directory, cls.COMPUTE_LOCK)
+        os.utime(lock_path)
 
     @classmethod
     def set_attempt_fields(
@@ -732,7 +728,6 @@ class StateManager:
                     number=attempt.number,
                     backend=attempt.backend,
                     started_at=attempt.started_at,
-                    heartbeat_at=attempt.heartbeat_at,
                     lease_duration_sec=attempt.lease_duration_sec,
                     lease_expires_at=attempt.lease_expires_at,
                     owner=attempt.owner,
@@ -769,7 +764,6 @@ class StateManager:
                     number=attempt.number,
                     backend=attempt.backend,
                     started_at=attempt.started_at,
-                    heartbeat_at=attempt.heartbeat_at,
                     lease_duration_sec=attempt.lease_duration_sec,
                     lease_expires_at=attempt.lease_expires_at,
                     owner=attempt.owner,
@@ -807,7 +801,6 @@ class StateManager:
                     number=attempt.number,
                     backend=attempt.backend,
                     started_at=attempt.started_at,
-                    heartbeat_at=attempt.heartbeat_at,
                     lease_duration_sec=attempt.lease_duration_sec,
                     lease_expires_at=attempt.lease_expires_at,
                     owner=attempt.owner,
@@ -870,7 +863,6 @@ class StateManager:
                     number=attempt.number,
                     backend=attempt.backend,
                     started_at=attempt.started_at,
-                    heartbeat_at=attempt.heartbeat_at,
                     lease_duration_sec=attempt.lease_duration_sec,
                     lease_expires_at=attempt.lease_expires_at,
                     owner=attempt.owner,
@@ -893,6 +885,10 @@ class StateManager:
                 if alive is False:
                     terminal_status = "crashed"
                     reason = "pid_dead"
+                elif isinstance(attempt, _StateAttemptRunning):
+                    reason = cls._running_heartbeat_reason(directory, attempt)
+                    if reason is not None:
+                        terminal_status = "crashed"
                 elif cls._lease_expired(attempt):
                     terminal_status = "crashed"
                     reason = "lease_expired"
@@ -905,11 +901,20 @@ class StateManager:
                         attempt.scheduler.update(
                             {k: v for k, v in verdict.items() if k != "terminal_status"}
                         )
-                if terminal_status is None and cls._lease_expired(attempt):
-                    terminal_status = "crashed"
-                    reason = "lease_expired"
+                if terminal_status is None:
+                    if isinstance(attempt, _StateAttemptRunning):
+                        reason = cls._running_heartbeat_reason(directory, attempt)
+                        if reason is not None:
+                            terminal_status = "crashed"
+                    elif cls._lease_expired(attempt):
+                        terminal_status = "crashed"
+                        reason = "lease_expired"
             else:
-                if cls._lease_expired(attempt):
+                if isinstance(attempt, _StateAttemptRunning):
+                    reason = cls._running_heartbeat_reason(directory, attempt)
+                    if reason is not None:
+                        terminal_status = "crashed"
+                elif cls._lease_expired(attempt):
                     terminal_status = "crashed"
                     reason = "lease_expired"
 
@@ -925,7 +930,6 @@ class StateManager:
                     number=attempt.number,
                     backend=attempt.backend,
                     started_at=attempt.started_at,
-                    heartbeat_at=attempt.heartbeat_at,
                     lease_duration_sec=attempt.lease_duration_sec,
                     lease_expires_at=attempt.lease_expires_at,
                     owner=attempt.owner,
@@ -942,7 +946,6 @@ class StateManager:
                         number=attempt.number,
                         backend=attempt.backend,
                         started_at=attempt.started_at,
-                        heartbeat_at=attempt.heartbeat_at,
                         lease_duration_sec=attempt.lease_duration_sec,
                         lease_expires_at=attempt.lease_expires_at,
                         owner=attempt.owner,
@@ -957,7 +960,6 @@ class StateManager:
                         number=attempt.number,
                         backend=attempt.backend,
                         started_at=attempt.started_at,
-                        heartbeat_at=attempt.heartbeat_at,
                         lease_duration_sec=attempt.lease_duration_sec,
                         lease_expires_at=attempt.lease_expires_at,
                         owner=attempt.owner,
@@ -972,7 +974,6 @@ class StateManager:
                         number=attempt.number,
                         backend=attempt.backend,
                         started_at=attempt.started_at,
-                        heartbeat_at=attempt.heartbeat_at,
                         lease_duration_sec=attempt.lease_duration_sec,
                         lease_expires_at=attempt.lease_expires_at,
                         owner=attempt.owner,
@@ -1083,16 +1084,28 @@ def compute_lock(
         return ", ".join(parts)
 
     def _describe_wait(attempt: _StateAttempt, waited_sec: float) -> str:
-        label = "last heartbeat"
-        timestamp = attempt.heartbeat_at
         if attempt.status == "queued":
             label = "queued at"
             timestamp = attempt.started_at
-        parsed = StateManager._parse_time(timestamp)
-        timestamp_info = timestamp
-        if parsed is not None:
-            age = (StateManager._utcnow() - parsed).total_seconds()
-            timestamp_info = f"{timestamp} ({_format_wait_duration(age)} ago)"
+            parsed = StateManager._parse_time(timestamp)
+            timestamp_info = timestamp
+            if parsed is not None:
+                age = (StateManager._utcnow() - parsed).total_seconds()
+                timestamp_info = f"{timestamp} ({_format_wait_duration(age)} ago)"
+        else:
+            label = "last heartbeat"
+            last_heartbeat = StateManager.last_heartbeat_mtime(directory)
+            if last_heartbeat is None:
+                timestamp_info = "missing"
+            else:
+                heartbeat_dt = _dt.datetime.fromtimestamp(
+                    last_heartbeat, tz=_dt.timezone.utc
+                )
+                age = time.time() - last_heartbeat
+                timestamp_info = (
+                    f"{heartbeat_dt.isoformat(timespec='seconds')} "
+                    f"({_format_wait_duration(age)} ago)"
+                )
         return (
             "waited "
             f"{_format_wait_duration(waited_sec)}, {label} {timestamp_info}, "
@@ -1244,11 +1257,7 @@ def compute_lock(
         # Start heartbeat IMMEDIATELY
         def heartbeat() -> None:
             while not stop_event.wait(heartbeat_interval_sec):
-                StateManager.heartbeat(
-                    directory,
-                    attempt_id=attempt_id,  # type: ignore[arg-type]
-                    lease_duration_sec=lease_duration_sec,
-                )
+                StateManager.heartbeat(directory)
 
         thread = threading.Thread(target=heartbeat, daemon=True)
         thread.start()

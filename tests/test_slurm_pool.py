@@ -1,7 +1,6 @@
 import json
 import os
 import time
-from datetime import timedelta
 from pathlib import Path
 from typing import ClassVar
 
@@ -903,21 +902,12 @@ def test_run_slurm_pool_stale_in_progress_raises(
         scheduler={},
     )
 
-    stale_at = (furu.StateManager._utcnow() - timedelta(seconds=5)).isoformat(
-        timespec="seconds"
+    lock_path = furu.StateManager.get_lock_path(
+        directory, furu.StateManager.COMPUTE_LOCK
     )
-    future_expires = (furu.StateManager._utcnow() + timedelta(seconds=120)).isoformat(
-        timespec="seconds"
-    )
-
-    def mutate(state) -> None:
-        attempt = state.attempt
-        if attempt is None:
-            raise AssertionError("missing attempt")
-        attempt.heartbeat_at = stale_at
-        attempt.lease_expires_at = future_expires
-
-    furu.StateManager.update_state(directory, mutate)
+    lock_path.write_text("lock")
+    stale_time = time.time() - 5.0
+    os.utime(lock_path, (stale_time, stale_time))
 
     monkeypatch.setattr(furu.FURU_CONFIG, "retry_failed", False)
     monkeypatch.setattr(furu.FURU_CONFIG, "stale_timeout", 0.01)

@@ -1,5 +1,6 @@
 import json
-from datetime import timedelta
+import os
+import time
 
 import furu
 from furu.execution.plan import (
@@ -168,6 +169,10 @@ def test_reconcile_in_progress_skips_fresh_attempts(furu_tmp_root) -> None:
         owner={"pid": 99999, "host": "other-host", "user": "x"},
         scheduler={},
     )
+    lock_path = furu.StateManager.get_lock_path(
+        directory, furu.StateManager.COMPUTE_LOCK
+    )
+    lock_path.write_text("lock")
 
     plan = build_plan([task])
 
@@ -184,7 +189,7 @@ def test_reconcile_in_progress_missing_timestamps_not_immediately_stale(
     task = Task(name="missing-timestamps")
     directory = task._base_furu_dir()
     furu.StateManager.ensure_internal_dir(directory)
-    furu.StateManager.start_attempt_running(
+    furu.StateManager.start_attempt_queued(
         directory,
         backend="local",
         lease_duration_sec=60.0,
@@ -196,7 +201,6 @@ def test_reconcile_in_progress_missing_timestamps_not_immediately_stale(
         attempt = state.attempt
         assert attempt is not None
         attempt.started_at = ""
-        attempt.heartbeat_at = ""
 
     furu.StateManager.update_state(directory, mutate)
     plan = build_plan([task])
@@ -204,10 +208,10 @@ def test_reconcile_in_progress_missing_timestamps_not_immediately_stale(
     assert reconcile_in_progress(plan, stale_timeout_sec=5.0) is False
     state = furu.StateManager.read_state(directory)
     assert state.attempt is not None
-    assert state.attempt.status == "running"
+    assert state.attempt.status == "queued"
 
 
-def test_reconcile_in_progress_stale_attempt_preempted(
+def test_reconcile_in_progress_stale_heartbeat_marks_crashed(
     furu_tmp_root, monkeypatch
 ) -> None:
     monkeypatch.setattr(furu.FURU_CONFIG, "retry_failed", True)
@@ -221,19 +225,16 @@ def test_reconcile_in_progress_stale_attempt_preempted(
         owner={"pid": 99999, "host": "other-host", "user": "x"},
         scheduler={},
     )
-
-    def mutate(state) -> None:
-        attempt = state.attempt
-        assert attempt is not None
-        stale_time = (furu.StateManager._utcnow() - timedelta(seconds=120)).isoformat(
-            timespec="seconds"
-        )
-        attempt.heartbeat_at = stale_time
-
-    furu.StateManager.update_state(directory, mutate)
+    lock_path = furu.StateManager.get_lock_path(
+        directory, furu.StateManager.COMPUTE_LOCK
+    )
+    lock_path.write_text("lock")
+    stale_time = time.time() - 120.0
+    os.utime(lock_path, (stale_time, stale_time))
     plan = build_plan([task])
 
-    assert reconcile_in_progress(plan, stale_timeout_sec=1.0) is True
+    assert reconcile_in_progress(plan, stale_timeout_sec=1.0) is False
     state = furu.StateManager.read_state(directory)
     assert state.attempt is not None
-    assert state.attempt.status == "preempted"
+    assert state.attempt.status == "crashed"
+    assert getattr(state.attempt, "reason", None) == "lease_expired"

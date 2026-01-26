@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
+from pathlib import Path
 from typing import Literal
 
 from ..config import FURU_CONFIG
@@ -146,20 +148,21 @@ def ready_todo(plan: DependencyPlan) -> list[str]:
 def _attempt_age_sec(
     attempt: _StateAttemptQueued | _StateAttemptRunning,
     *,
-    updated_at: str | None,
+    directory: Path,
     stale_timeout_sec: float,
     digest: str,
     name: str,
 ) -> float | None:
-    timestamp = attempt.heartbeat_at
     if attempt.status == "queued":
-        timestamp = attempt.started_at
-    parsed = StateManager._parse_time(timestamp)
-    if parsed is None:
-        parsed = StateManager._parse_time(updated_at)
-    if parsed is not None:
-        _MISSING_TIMESTAMP_SEEN.pop(digest, None)
-        return (StateManager._utcnow() - parsed).total_seconds()
+        parsed = StateManager._parse_time(attempt.started_at)
+        if parsed is not None:
+            _MISSING_TIMESTAMP_SEEN.pop(digest, None)
+            return (StateManager._utcnow() - parsed).total_seconds()
+    else:
+        last_heartbeat = StateManager.last_heartbeat_mtime(directory)
+        if last_heartbeat is not None:
+            _MISSING_TIMESTAMP_SEEN.pop(digest, None)
+            return max(0.0, time.time() - last_heartbeat)
     if stale_timeout_sec <= 0:
         return None
     now = StateManager._utcnow().timestamp()
@@ -198,7 +201,7 @@ def reconcile_in_progress(
         name = f"{node.obj.__class__.__name__}({node.obj.furu_hash})"
         age = _attempt_age_sec(
             attempt,
-            updated_at=state.updated_at,
+            directory=node.obj._base_furu_dir(),
             stale_timeout_sec=stale_timeout_sec,
             digest=node.obj.furu_hash,
             name=name,

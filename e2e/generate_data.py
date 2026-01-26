@@ -121,7 +121,6 @@ def create_mock_experiment(
             "backend": "local",
             "status": attempt_status,
             "started_at": "2025-01-01T11:00:00+00:00",
-            "heartbeat_at": "2025-01-01T11:30:00+00:00",
             "lease_duration_sec": 120.0,
             "lease_expires_at": "2025-01-01T13:00:00+00:00",
             "owner": {

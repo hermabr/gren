@@ -96,18 +96,7 @@ def test_reconcile_marks_dead_local_attempt_as_crashed(furu_tmp_root, tmp_path) 
         scheduler={},
     )
 
-    assert (
-        furu.StateManager.heartbeat(
-            directory, attempt_id="wrong", lease_duration_sec=60.0
-        )
-        is False
-    )
-    assert (
-        furu.StateManager.heartbeat(
-            directory, attempt_id=attempt_id, lease_duration_sec=60.0
-        )
-        is True
-    )
+    _ = attempt_id
 
     # If reconcile decides the attempt is dead, it clears the compute lock.
     lock_path = furu.StateManager.get_lock_path(
@@ -128,6 +117,24 @@ def test_reconcile_marks_dead_local_attempt_as_crashed(furu_tmp_root, tmp_path) 
     assert state2.attempt is not None
     assert state2.attempt.status == "crashed"
     assert lock_path.exists() is False
+
+
+def test_reconcile_marks_missing_heartbeat_as_crashed(furu_tmp_root, tmp_path) -> None:
+    directory = tmp_path / "obj"
+    furu.StateManager.ensure_internal_dir(directory)
+
+    furu.StateManager.start_attempt_running(
+        directory,
+        backend="local",
+        lease_duration_sec=60.0,
+        owner={"pid": 99999, "host": "other-host", "user": "x"},
+        scheduler={},
+    )
+
+    state = furu.StateManager.reconcile(directory)
+    assert state.attempt is not None
+    assert state.attempt.status == "crashed"
+    assert getattr(state.attempt, "reason", None) == "missing_heartbeat"
 
 
 def test_update_state_skips_write_on_noop_mutator(
@@ -641,7 +648,7 @@ def test_compute_lock_waits_for_queued_backend(furu_tmp_root, tmp_path) -> None:
 
 
 def test_compute_lock_heartbeat_runs(furu_tmp_root, tmp_path) -> None:
-    """Test that the heartbeat thread updates the lease while lock is held."""
+    """Test that the heartbeat thread touches the lock while held."""
     directory = tmp_path / "obj"
     furu.StateManager.ensure_internal_dir(directory)
 
@@ -652,17 +659,12 @@ def test_compute_lock_heartbeat_runs(furu_tmp_root, tmp_path) -> None:
         heartbeat_interval_sec=0.05,  # Heartbeat every 50ms
         owner={"pid": 12345, "host": "test-host", "user": "test-user"},
     ):
-        state_before = furu.StateManager.read_state(directory)
-        assert state_before.attempt is not None
-        assert state_before.attempt.status == "running"
-        initial_lease_expires = state_before.attempt.lease_expires_at  # type: ignore[union-attr]
+        lock_path = furu.StateManager.get_lock_path(
+            directory, furu.StateManager.COMPUTE_LOCK
+        )
+        initial_mtime = lock_path.stat().st_mtime
 
-        # Wait long enough for heartbeat to update (need >1 second for ISO timestamp change)
-        time.sleep(1.1)
+        time.sleep(0.2)
 
-        state_after = furu.StateManager.read_state(directory)
-        assert state_after.attempt is not None
-        updated_lease_expires = state_after.attempt.lease_expires_at  # type: ignore[union-attr]
-
-        # Lease expiry should have been extended by heartbeat
-        assert updated_lease_expires != initial_lease_expires
+        updated_mtime = lock_path.stat().st_mtime
+        assert updated_mtime > initial_mtime
