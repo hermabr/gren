@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Use `SUCCESS.json` markers for `exists()`/planner cache checks and alias resolution to avoid `state.json` reads.
 - Move attempt heartbeats to compute-lock mtimes and remove `heartbeat_at` from state and dashboard APIs (breaking).
 - Route local executor run logs to each artifact's `.furu/furu.log`.
 - Include caller locations for get/dependency logs (including `furu.log` call sites).

@@ -88,6 +88,7 @@ def test_build_plan_treats_validation_error_as_missing(furu_tmp_root, caplog) ->
         scheduler={},
     )
     furu.StateManager.finish_attempt_success(directory, attempt_id=attempt_id)
+    furu.StateManager.write_success_marker(directory, attempt_id=attempt_id)
 
     caplog.set_level("WARNING")
     plan = build_plan([task])
@@ -108,6 +109,7 @@ def test_build_plan_logs_unexpected_validate_error(furu_tmp_root, caplog) -> Non
         scheduler={},
     )
     furu.StateManager.finish_attempt_success(directory, attempt_id=attempt_id)
+    furu.StateManager.write_success_marker(directory, attempt_id=attempt_id)
 
     caplog.set_level("ERROR")
     plan = build_plan([task])

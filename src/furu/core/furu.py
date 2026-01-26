@@ -63,7 +63,6 @@ from ..storage.state import (
     _StateAttemptRunning,
     _StateResultAbsent,
     _StateResultFailed,
-    _StateResultMigrated,
     _StateResultSuccess,
     compute_lock,
 )
@@ -284,8 +283,10 @@ class Furu[T](ABC):
         """Get the directory for this Furu object."""
         directory = self._base_furu_dir()
         migration = self._alias_record(directory)
-        if migration is not None and self._alias_is_active(directory, migration):
-            return MigrationManager.resolve_dir(migration, target="from")
+        if migration is not None:
+            target_dir = self._alias_target_dir(directory, migration)
+            if target_dir is not None:
+                return target_dir
         return directory
 
     @property
@@ -316,9 +317,8 @@ class Furu[T](ABC):
 
     def _exists_quiet(self: Self) -> bool:
         directory = self._base_furu_dir()
-        state = self.get_state(directory)
-
-        if not isinstance(state.result, _StateResultSuccess):
+        success_dir = self._success_marker_dir(directory)
+        if success_dir is None:
             return False
         try:
             return self._validate()
@@ -345,9 +345,8 @@ class Furu[T](ABC):
         """Check if result exists and is valid."""
         logger = get_logger()
         directory = self._base_furu_dir()
-        state = self.get_state(directory)
-
-        if not isinstance(state.result, _StateResultSuccess):
+        success_dir = self._success_marker_dir(directory)
+        if success_dir is None:
             logger.info("exists %s -> false", directory)
             return False
 
@@ -507,15 +506,18 @@ class Furu[T](ABC):
                 directory = base_dir
                 migration = self._alias_record(base_dir)
                 alias_active = False
+                base_marker = StateManager.success_marker_exists(base_dir)
 
                 if (
                     migration is not None
                     and migration.kind == "alias"
                     and migration.overwritten_at is None
+                    and not base_marker
                 ):
-                    target_dir = MigrationManager.resolve_dir(migration, target="from")
-                    target_state = StateManager.read_state(target_dir)
-                    if isinstance(target_state.result, _StateResultSuccess):
+                    target_dir = self._alias_target_dir(
+                        base_dir, migration, base_marker=base_marker
+                    )
+                    if target_dir is not None:
                         alias_active = True
                         directory = target_dir
                     else:
@@ -794,9 +796,11 @@ class Furu[T](ABC):
         """Return the alias-aware state for this Furu directory."""
         base_dir = directory or self._base_furu_dir()
         record = self._alias_record(base_dir)
-        if record is None or not self._alias_is_active(base_dir, record):
+        if record is None:
             return StateManager.read_state(base_dir)
-        target_dir = MigrationManager.resolve_dir(record, target="from")
+        target_dir = self._alias_target_dir(base_dir, record)
+        if target_dir is None:
+            return StateManager.read_state(base_dir)
         return StateManager.read_state(target_dir)
 
     def _alias_record(self, directory: Path) -> MigrationRecord | None:
@@ -805,15 +809,36 @@ class Furu[T](ABC):
             return None
         return record
 
-    def _alias_is_active(self, directory: Path, record: MigrationRecord) -> bool:
+    def _alias_target_dir(
+        self,
+        directory: Path,
+        record: MigrationRecord,
+        *,
+        base_marker: bool | None = None,
+    ) -> Path | None:
         if record.overwritten_at is not None:
-            return False
-        state = StateManager.read_state(directory)
-        if not isinstance(state.result, _StateResultMigrated):
-            return False
+            return None
+        if base_marker is None:
+            base_marker = StateManager.success_marker_exists(directory)
+        if base_marker:
+            return None
         target = MigrationManager.resolve_dir(record, target="from")
-        target_state = StateManager.read_state(target)
-        return isinstance(target_state.result, _StateResultSuccess)
+        if StateManager.success_marker_exists(target):
+            return target
+        return None
+
+    def _success_marker_dir(self, directory: Path) -> Path | None:
+        base_marker = StateManager.success_marker_exists(directory)
+        record = self._alias_record(directory)
+        if record is None:
+            return directory if base_marker else None
+        target_dir = self._alias_target_dir(directory, record, base_marker=base_marker)
+        if target_dir is not None:
+            return target_dir
+        return directory if base_marker else None
+
+    def _alias_is_active(self, directory: Path, record: MigrationRecord) -> bool:
+        return self._alias_target_dir(directory, record) is not None
 
     def _maybe_detach_alias(
         self: Self,
