@@ -94,6 +94,8 @@
     - [ ] for local, rather than having number of parallel jobs, have resources required by each job, for instance only one gpu job, but can have multiple cpu jobs in parallel
     - [ ] dashboard for experiment runner
     - [ ] the executor runner should also write out when it starts running a task
+- [ ] compute lock heartbeat - check in on the queued items on occasion
+- [ ] make the behavior for queuing better, where it checks if the processes that has queued it/the job is still alive
 
 ### Submitit
 
