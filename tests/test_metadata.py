@@ -79,7 +79,10 @@ def test_collect_git_info_requires_git_remote(monkeypatch) -> None:
     monkeypatch.setattr(furu.FURU_CONFIG, "record_git", "uncached")
     monkeypatch.setattr(furu.FURU_CONFIG, "allow_no_git_origin", False)
 
-    with pytest.raises(RuntimeError, match="FURU_ALLOW_NO_GIT_ORIGIN=1"):
+    with pytest.raises(
+        RuntimeError,
+        match="FURU_ALLOW_NO_GIT_ORIGIN=1.*FURU_RECORD_GIT=ignore",
+    ):
         furu.MetadataManager.collect_git_info(ignore_diff=True)
 
 

@@ -150,7 +150,8 @@ class MetadataManager:
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
                 raise RuntimeError(
                     "Git remote 'origin' is required for provenance but was not found. "
-                    "Set FURU_ALLOW_NO_GIT_ORIGIN=1 to allow missing origin."
+                    "Set FURU_ALLOW_NO_GIT_ORIGIN=1 to allow missing origin, "
+                    "or set FURU_RECORD_GIT=ignore to disable git metadata."
                 ) from e
 
         if ignore_diff:

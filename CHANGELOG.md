@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Clarify missing git origin guidance with the option to disable git metadata via
+  `FURU_RECORD_GIT=ignore`.
+
 ## v0.0.5
 
 - Speed up state/plan checks with SUCCESS markers,
